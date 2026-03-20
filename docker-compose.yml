@@ -22,6 +22,8 @@ services:
     depends_on:
       redis:
         condition: service_healthy
+    env_file:
+      - .env
     environment:
       - DJANGO_SETTINGS_MODULE=avatar_system.settings
       - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me-in-production}
@@ -43,19 +45,12 @@ services:
       # Live code reload in development
       - .:/app:cached
     ports:
-      - "${PORT:-8000}:8000"
+      - "${PORT:-8006}:8000"
     command: >
       sh -c "python manage.py migrate --noinput &&
+             python manage.py createsuperuser --noinput 2>/dev/null || true &&
              daphne -b 0.0.0.0 -p 8000 --websocket_timeout 3600
              avatar_system.asgi:application"
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
   # ── Celery worker (optional – for async fitting jobs) ──────────────────────
   # Uncomment when you replace threading.Thread in tasks.py with Celery
   # worker:

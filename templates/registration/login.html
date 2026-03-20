@@ -1,0 +1,136 @@
+{% load static %}
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login — SOMA Avatar System</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700;800&family=DM+Mono:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg:      #0a0a0b;
+  --surface: #111114;
+  --border:  #1e1e24;
+  --border2: #2a2a34;
+  --text:    #e8e8ee;
+  --muted:   #5a5a72;
+  --accent:  #c8f060;
+  --danger:  #f06060;
+  --r:       6px;
+  --font:    'Syne', sans-serif;
+  --mono:    'DM Mono', monospace;
+}
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body {
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.login-box {
+  width: 360px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--r);
+  overflow: hidden;
+}
+.login-header {
+  padding: 32px 32px 24px;
+  border-bottom: 1px solid var(--border);
+}
+.login-logo {
+  font-size: 1.8rem;
+  font-weight: 800;
+  letter-spacing: -1px;
+  color: var(--accent);
+  margin-bottom: 6px;
+}
+.login-logo span { color: var(--muted); font-weight: 400; }
+.login-sub {
+  font-size: .75rem;
+  color: var(--muted);
+  font-family: var(--mono);
+}
+.login-body { padding: 28px 32px 32px; }
+.form-group { display: flex; flex-direction: column; gap: 6px; margin-bottom: 16px; }
+label {
+  font-size: .72rem;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  color: var(--muted);
+}
+input[type=text], input[type=password] {
+  background: var(--bg);
+  border: 1px solid var(--border2);
+  color: var(--text);
+  padding: 10px 12px;
+  border-radius: var(--r);
+  font-family: var(--mono);
+  font-size: .88rem;
+  outline: none;
+  transition: border .15s;
+  width: 100%;
+}
+input:focus { border-color: var(--accent); }
+.btn {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  padding: 10px 16px;
+  border-radius: var(--r);
+  font-family: var(--font);
+  font-size: .88rem;
+  font-weight: 700;
+  cursor: pointer;
+  border: none;
+  background: var(--accent);
+  color: #0a0a0b;
+  transition: opacity .15s;
+  margin-top: 8px;
+}
+.btn:hover { opacity: .88; }
+.error-list {
+  background: rgba(240,96,96,.08);
+  border: 1px solid rgba(240,96,96,.25);
+  border-radius: var(--r);
+  padding: 10px 14px;
+  margin-bottom: 16px;
+  font-size: .8rem;
+  color: var(--danger);
+  font-family: var(--mono);
+}
+</style>
+</head>
+<body>
+<div class="login-box">
+  <div class="login-header">
+    <div class="login-logo">SOMA<span>.</span></div>
+    <div class="login-sub">Avatar System — Zugang erforderlich</div>
+  </div>
+  <div class="login-body">
+    {% if form.errors %}
+    <div class="error-list">Ungültige Zugangsdaten. Bitte erneut versuchen.</div>
+    {% endif %}
+    <form method="post">
+      {% csrf_token %}
+      <input type="hidden" name="next" value="{{ next }}">
+      <div class="form-group">
+        <label for="id_username">Benutzername</label>
+        <input type="text" id="id_username" name="username" autofocus autocomplete="username">
+      </div>
+      <div class="form-group">
+        <label for="id_password">Passwort</label>
+        <input type="password" id="id_password" name="password" autocomplete="current-password">
+      </div>
+      <button type="submit" class="btn">Anmelden</button>
+    </form>
+  </div>
+</div>
+</body>
+</html>
