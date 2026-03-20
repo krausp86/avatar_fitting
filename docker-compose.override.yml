@@ -1,0 +1,13 @@
+# docker-compose.override.yml
+# Used automatically by docker compose for local CPU development.
+# Overrides GPU settings and uses CPU Dockerfile.
+#
+# Usage: docker compose up   (uses this file automatically)
+# GPU:   docker compose -f docker-compose.yml up
+
+services:
+  web:
+    build:
+      dockerfile: Dockerfile.cpu
+    deploy:
+      resources: {}   # remove GPU reservation

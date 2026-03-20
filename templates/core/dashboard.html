@@ -1,0 +1,77 @@
+{% extends "base.html" %}
+{% block title %}Dashboard{% endblock %}
+{% block nav_dash %}active{% endblock %}
+{% block page_title %}Dashboard{% endblock %}
+{% block page_sub %}Übersicht des Avatar-Systems{% endblock %}
+
+{% block content %}
+<div class="grid-4 mb-16">
+  <div class="stat-tile">
+    <div class="stat-label">Videos</div>
+    <div class="stat-value accent">{{ video_count }}</div>
+  </div>
+  <div class="stat-tile">
+    <div class="stat-label">Personen-Tracks</div>
+    <div class="stat-value">{{ person_count }}</div>
+  </div>
+  <div class="stat-tile">
+    <div class="stat-label">Identitäten</div>
+    <div class="stat-value accent2">{{ group_count }}</div>
+  </div>
+  <div class="stat-tile">
+    <div class="stat-label">Avatare</div>
+    <div class="stat-value">{{ avatar_count }}</div>
+  </div>
+</div>
+
+<div class="grid-2" style="gap:24px">
+  <!-- Recent Avatars -->
+  <div class="card">
+    <div class="card-header">
+      Zuletzt bearbeitet
+      <a href="{% url 'avatar_list' %}" class="btn btn-ghost btn-sm">Alle →</a>
+    </div>
+    <div class="card-body">
+      {% if recent_avatars %}
+        {% for av in recent_avatars %}
+        <a href="{% url 'avatar_detail' av.pk %}" style="text-decoration:none;color:inherit">
+          <div class="flex-center gap-12" style="padding:10px 0;border-bottom:1px solid var(--border)">
+            <div style="width:36px;height:36px;border-radius:4px;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:1.1rem;flex-shrink:0">◌</div>
+            <div style="flex:1;min-width:0">
+              <div class="fw-700 truncate">{{ av.name }}</div>
+              <div class="text-sm text-muted text-mono">v{{ av.version }} · {{ av.get_status_display }}</div>
+            </div>
+            <span class="badge badge-{{ av.status }}">{{ av.get_status_display }}</span>
+          </div>
+        </a>
+        {% endfor %}
+      {% else %}
+        <div class="text-muted text-sm" style="padding:20px 0;text-align:center">Noch keine Avatare</div>
+      {% endif %}
+    </div>
+  </div>
+
+  <!-- Running Jobs -->
+  <div class="card">
+    <div class="card-header">Aktive Fitting-Jobs</div>
+    <div class="card-body">
+      {% if running_jobs %}
+        {% for job in running_jobs %}
+        <div style="margin-bottom:16px">
+          <div class="flex-center gap-8 mb-8">
+            <span class="fw-700 text-sm">{{ job.avatar.name }}</span>
+            <span class="text-mono text-sm text-muted">Stage {{ job.current_stage }}</span>
+            <span class="ml-auto text-mono text-sm text-accent2">{{ job.progress|floatformat:0 }}%</span>
+          </div>
+          <div class="progress-bar">
+            <div class="progress-fill running" style="width:{{ job.progress }}%"></div>
+          </div>
+        </div>
+        {% endfor %}
+      {% else %}
+        <div class="text-muted text-sm" style="padding:20px 0;text-align:center">Keine laufenden Jobs</div>
+      {% endif %}
+    </div>
+  </div>
+</div>
+{% endblock %}

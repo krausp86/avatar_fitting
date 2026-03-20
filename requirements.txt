@@ -1,0 +1,15 @@
+# Layer 3 – Django app (lightweight, changes often)
+
+django==5.0.6
+channels==4.1.0
+daphne==4.1.2
+channels-redis==4.2.0
+redis==5.0.4
+
+# API + utils
+djangorestframework==3.15.1
+django-cors-headers==4.3.1
+python-dotenv==1.0.1
+
+# Dev
+django-debug-toolbar==4.3.0

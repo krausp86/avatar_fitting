@@ -1,0 +1,10 @@
+# Layer 1 – Heavy ML packages (slow to install, rarely change)
+# Install these first so Docker caches this layer
+
+torch==2.3.0
+torchvision==0.18.0
+numpy==1.26.4
+scipy==1.13.0
+scikit-learn==1.4.2
+Pillow==10.3.0
+opencv-python-headless==4.9.0.80

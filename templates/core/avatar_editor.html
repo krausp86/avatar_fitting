@@ -1,0 +1,316 @@
+{% extends "base.html" %}
+{% block title %}Editor – {{ avatar.name }}{% endblock %}
+{% block nav_avatars %}active{% endblock %}
+{% block page_title %}Editor — {{ avatar.name }}{% endblock %}
+{% block page_sub %}v{{ avatar.version }} · nicht-destruktiv{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn btn-ghost btn-sm" onclick="history.back()">← Zurück</button>
+<button class="btn btn-secondary btn-sm" onclick="resetEdits()">Reset</button>
+<button class="btn btn-primary btn-sm" onclick="saveEdits()">💾 Speichern</button>
+{% endblock %}
+
+{% block extra_head %}
+<style>
+.editor-layout { display: grid; grid-template-columns: 260px 1fr 260px; gap: 0; height: calc(100vh - 65px); margin: -32px; }
+.editor-left, .editor-right { background: var(--surface); border-right: 1px solid var(--border); overflow-y: auto; }
+.editor-right { border-left: 1px solid var(--border); border-right: none; }
+.editor-center { background: var(--bg); display: flex; align-items: center; justify-content: center; position: relative; }
+.panel-section { padding: 14px 16px; border-bottom: 1px solid var(--border); }
+.panel-title { font-size: .7rem; letter-spacing: .1em; text-transform: uppercase; color: var(--muted); font-weight: 700; margin-bottom: 12px; }
+.slider-row { display: flex; flex-direction: column; gap: 4px; margin-bottom: 12px; }
+.slider-row label { display: flex; justify-content: space-between; font-size: .76rem; font-weight: 600; }
+.slider-row label span { font-family: var(--mono); color: var(--accent); }
+.region-btn { padding: 5px 10px; border-radius: 4px; border: 1px solid var(--border2); background: transparent; color: var(--muted); font-size: .74rem; font-family: var(--font); font-weight: 600; cursor: pointer; transition: all .15s; }
+.region-btn.active { border-color: var(--accent2); color: var(--accent2); background: rgba(96,200,240,.08); }
+.tab-row { display: flex; border-bottom: 1px solid var(--border); }
+.tab-btn { flex: 1; padding: 10px; text-align: center; font-size: .78rem; font-weight: 700; cursor: pointer; border: none; background: transparent; color: var(--muted); border-bottom: 2px solid transparent; transition: all .15s; }
+.tab-btn.active { color: var(--accent); border-bottom-color: var(--accent); }
+.tab-content { display: none; }
+.tab-content.active { display: block; }
+.bounce-btn { width: 100%; padding: 8px; border-radius: var(--r); border: 1px solid var(--border2); background: transparent; color: var(--text); font-family: var(--font); font-size: .8rem; font-weight: 700; cursor: pointer; transition: all .15s; margin-bottom: 8px; }
+.bounce-btn:hover { border-color: var(--accent2); color: var(--accent2); }
+#viewport { width: 100%; height: 100%; display: block; }
+.viewport-overlay { position: absolute; top: 16px; left: 50%; transform: translateX(-50%); display: flex; gap: 8px; }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="editor-layout">
+
+  <!-- LEFT: Shape + Appearance -->
+  <div class="editor-left">
+    <div class="tab-row">
+      <button class="tab-btn active" onclick="switchTab('shape',this)">Form</button>
+      <button class="tab-btn" onclick="switchTab('appearance',this)">Textur</button>
+      <button class="tab-btn" onclick="switchTab('hair',this)">Haare</button>
+    </div>
+
+    <!-- Shape tab -->
+    <div id="tab-shape" class="tab-content active">
+      <div class="panel-section">
+        <div class="panel-title">Körperform β</div>
+        {% for name,key,min,max,default in "Körpergröße:height:-2:2:0,Körpergewicht:weight:-2:2:0,Schulterbreite:shoulder:-2:2:0,Taillenweite:waist:-2:2:0,Brustgröße:bust:-2:2:0,Hüftweite:hip:-2:2:0,Beinlänge:leg_length:-2:2:0"|split:"," %}
+        {% endfor %}
+        <div class="slider-row"><label>Körpergröße <span id="val-height">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('height',this.value)"></div>
+        <div class="slider-row"><label>Körpergewicht <span id="val-weight">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('weight',this.value)"></div>
+        <div class="slider-row"><label>Schulterbreite <span id="val-shoulder">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('shoulder',this.value)"></div>
+        <div class="slider-row"><label>Taillenweite <span id="val-waist">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('waist',this.value)"></div>
+        <div class="slider-row"><label>Brustgröße <span id="val-bust">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('bust',this.value)"></div>
+        <div class="slider-row"><label>Hüftweite <span id="val-hip">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('hip',this.value)"></div>
+        <div class="slider-row"><label>Beinlänge <span id="val-leg">0.00</span></label><input type="range" min="-2" max="2" step="0.01" value="0" oninput="updateShape('leg',this.value)"></div>
+      </div>
+    </div>
+
+    <!-- Hair tab -->
+    <div id="tab-hair" class="tab-content">
+      <div class="panel-section">
+        <div class="panel-title">Haarstil</div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:6px;margin-bottom:12px">
+          {% for style in "Kurz glatt,Kurz lockig,Mittel glatt,Mittel lockig,Lang glatt,Lang lockig,Sehr lang,Glatze"|split:"," %}
+          <button class="region-btn" style="font-size:.72rem" onclick="selectHairStyle('{{ style }}',this)">{{ style }}</button>
+          {% endfor %}
+        </div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-title">Haarfarbe</div>
+        <div style="display:flex;gap:8px;flex-wrap:wrap;margin-bottom:10px">
+          {% for color,hex in "Schwarz:#1a1008,Dunkelbraun:#3d2010,Braun:#6b3a1f,Hellbraun:#a0612a,Blond:#c8a050,Hellblond:#e8d090,Rot:#8b2020,Grau:#808080,Weiß:#e8e8e8"|split:"," %}
+          <div style="width:24px;height:24px;border-radius:50%;background:{{ hex }};cursor:pointer;border:2px solid transparent;transition:border .15s" title="{{ color }}" onclick="selectHairColor('{{ color }}','{{ hex }}',this)"></div>
+          {% endfor %}
+        </div>
+        <div class="slider-row">
+          <label>Helligkeit <span id="val-hair-bright">0.00</span></label>
+          <input type="range" min="-1" max="1" step="0.01" value="0" oninput="updateHair('brightness',this.value)">
+        </div>
+        <div class="slider-row">
+          <label>Glanz <span id="val-hair-gloss">0.30</span></label>
+          <input type="range" min="0" max="1" step="0.01" value="0.3" oninput="updateHair('gloss',this.value)">
+        </div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-title">Haar-Physik</div>
+        <div class="slider-row">
+          <label>Steifigkeit <span id="val-hair-stiff">0.10</span></label>
+          <input type="range" min="0" max="1" step="0.01" value="0.1" oninput="updateHair('stiffness',this.value)">
+          <div class="form-hint">0 = sehr weich (lockig) · 1 = steif (glatt)</div>
+        </div>
+        <div class="slider-row">
+          <label>Masse <span id="val-hair-mass">0.20</span></label>
+          <input type="range" min="0" max="1" step="0.01" value="0.2" oninput="updateHair('mass',this.value)">
+        </div>
+        <div class="slider-row">
+          <label>Dämpfung <span id="val-hair-damp">0.60</span></label>
+          <input type="range" min="0" max="1" step="0.01" value="0.6" oninput="updateHair('damping',this.value)">
+        </div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-title">Rekonstruktion</div>
+        <div class="form-hint" style="margin-bottom:8px">Methode für das Fitting aus Video</div>
+        <select id="hairReconMethod" style="width:100%" onchange="updateHair('recon_method',this.value)">
+          <option value="mesh">Mesh-basiert (schnell)</option>
+          <option value="neuralhaircut">NeuralHaircut (realistisch)</option>
+          <option value="gaussian">Gaussian Splatting</option>
+        </select>
+      </div>
+    </div>
+      <div class="panel-section">
+        <div class="panel-title">Hautton</div>
+        <div class="slider-row"><label>Helligkeit <span id="val-bright">0.00</span></label><input type="range" min="-1" max="1" step="0.01" value="0" oninput="updateAppearance('brightness',this.value)"></div>
+        <div class="slider-row"><label>Warmton <span id="val-warm">0.00</span></label><input type="range" min="-1" max="1" step="0.01" value="0" oninput="updateAppearance('warmth',this.value)"></div>
+        <div class="slider-row"><label>Sättigung <span id="val-sat">0.00</span></label><input type="range" min="-1" max="1" step="0.01" value="0" oninput="updateAppearance('saturation',this.value)"></div>
+      </div>
+      <div class="panel-section">
+        <div class="panel-title">Material</div>
+        <div class="slider-row"><label>Roughness <span id="val-rough">0.50</span></label><input type="range" min="0" max="1" step="0.01" value="0.5" oninput="updateAppearance('roughness',this.value)"></div>
+        <div class="slider-row"><label>Specular <span id="val-spec">0.30</span></label><input type="range" min="0" max="1" step="0.01" value="0.3" oninput="updateAppearance('specular',this.value)"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- CENTER: 3D Viewport -->
+  <div class="editor-center">
+    <canvas id="viewport"></canvas>
+    <div class="viewport-overlay">
+      <button class="btn btn-ghost btn-sm" onclick="setView('front')">Vorne</button>
+      <button class="btn btn-ghost btn-sm" onclick="setView('back')">Hinten</button>
+      <button class="btn btn-ghost btn-sm" onclick="setView('left')">Links</button>
+      <button class="btn btn-ghost btn-sm" onclick="setView('right')">Rechts</button>
+    </div>
+  </div>
+
+  <!-- RIGHT: Physics -->
+  <div class="editor-right">
+    <div class="panel-section">
+      <div class="panel-title">Physik – Region</div>
+      <div style="display:flex;flex-wrap:wrap;gap:6px;margin-bottom:12px">
+        <button class="region-btn active" onclick="selectRegion('torso',this)">Torso</button>
+        <button class="region-btn" onclick="selectRegion('bust',this)">Brust</button>
+        <button class="region-btn" onclick="selectRegion('belly',this)">Bauch</button>
+        <button class="region-btn" onclick="selectRegion('glutes',this)">Gesäß</button>
+        <button class="region-btn" onclick="selectRegion('arms',this)">Arme</button>
+        <button class="region-btn" onclick="selectRegion('legs',this)">Beine</button>
+      </div>
+
+      <div id="physics-region-label" class="panel-title" style="color:var(--accent2)">Torso</div>
+
+      <div class="slider-row">
+        <label>Weichheit <span id="val-spring">0.50</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.5" id="sl-spring" oninput="updatePhysics('spring',this.value)">
+        <div class="form-hint">0 = sehr weich · 1 = steif</div>
+      </div>
+      <div class="slider-row">
+        <label>Masse <span id="val-mass">0.50</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.5" id="sl-mass" oninput="updatePhysics('mass',this.value)">
+        <div class="form-hint">höher = mehr Trägheit</div>
+      </div>
+      <div class="slider-row">
+        <label>Dämpfung <span id="val-damp">0.50</span></label>
+        <input type="range" min="0" max="1" step="0.01" value="0.5" id="sl-damp" oninput="updatePhysics('damp',this.value)">
+        <div class="form-hint">0 = schwingt lange · 1 = sofort ruhig</div>
+      </div>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Vorschau</div>
+      <button class="bounce-btn" onclick="runBounceTest()">⬇ Bounce-Test</button>
+      <button class="bounce-btn" onclick="runGravityTest()">↻ Gravitations-Test</button>
+    </div>
+
+    <div class="panel-section">
+      <div class="panel-title">Edit-Label</div>
+      <input type="text" id="editLabel" placeholder="z.B. Weichere Brust" style="width:100%">
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const SAVE_URL = '{% url "avatar_edit_save" avatar.pk %}';
+const CSRF     = '{{ csrf_token }}';
+
+let delta = { shape: {}, appearance: {}, physics: {}, hair: {} };
+let activeRegion = 'torso';
+
+function switchTab(tab, btn) {
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.tab-content').forEach(c => c.classList.remove('active'));
+  btn.classList.add('active');
+  document.getElementById('tab-' + tab).classList.add('active');
+}
+
+function updateShape(key, val) {
+  document.getElementById('val-' + key).textContent = parseFloat(val).toFixed(2);
+  delta.shape[key] = parseFloat(val);
+}
+
+function updateAppearance(key, val) {
+  const ids = {brightness:'bright',warmth:'warm',saturation:'sat',roughness:'rough',specular:'spec'};
+  document.getElementById('val-' + ids[key]).textContent = parseFloat(val).toFixed(2);
+  delta.appearance[key] = parseFloat(val);
+}
+
+function selectRegion(region, btn) {
+  document.querySelectorAll('.region-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  activeRegion = region;
+  document.getElementById('physics-region-label').textContent =
+    btn.textContent;
+
+  // Restore saved values for this region
+  const saved = delta.physics[region] || {};
+  document.getElementById('sl-spring').value = saved.spring ?? 0.5;
+  document.getElementById('sl-mass').value   = saved.mass   ?? 0.5;
+  document.getElementById('sl-damp').value   = saved.damp   ?? 0.5;
+  document.getElementById('val-spring').textContent = (saved.spring ?? 0.5).toFixed(2);
+  document.getElementById('val-mass').textContent   = (saved.mass   ?? 0.5).toFixed(2);
+  document.getElementById('val-damp').textContent   = (saved.damp   ?? 0.5).toFixed(2);
+}
+
+function updatePhysics(key, val) {
+  document.getElementById('val-' + key).textContent = parseFloat(val).toFixed(2);
+  if (!delta.physics[activeRegion]) delta.physics[activeRegion] = {};
+  delta.physics[activeRegion][key] = parseFloat(val);
+}
+
+function runBounceTest() { console.log('bounce test – TODO: animate viewport'); }
+function runGravityTest(){ console.log('gravity test – TODO: animate viewport'); }
+function setView(dir)    { console.log('set view:', dir, '– TODO: orbit camera'); }
+
+function selectHairStyle(style, btn) {
+  document.querySelectorAll('#tab-hair .region-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  delta.hair.style = style;
+}
+
+function selectHairColor(name, hex, el) {
+  document.querySelectorAll('#tab-hair [title]').forEach(e => e.style.border = '2px solid transparent');
+  el.style.border = '2px solid var(--accent)';
+  delta.hair.color_name = name;
+  delta.hair.color_hex  = hex;
+}
+
+function updateHair(key, val) {
+  const ids = { brightness:'hair-bright', gloss:'hair-gloss', stiffness:'hair-stiff', mass:'hair-mass', damping:'hair-damp' };
+  if (ids[key]) document.getElementById('val-' + ids[key]).textContent = parseFloat(val).toFixed(2);
+  delta.hair[key] = isNaN(parseFloat(val)) ? val : parseFloat(val);
+}
+function resetEdits() { delta = { shape:{}, appearance:{}, physics:{}, hair:{} }; toast('Reset'); }
+
+async function saveEdits() {
+  const label = document.getElementById('editLabel').value.trim();
+  const body  = JSON.stringify({ ...delta, label });
+  await fetch(SAVE_URL, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-CSRFToken': CSRF },
+    body,
+  });
+  toast('Änderungen gespeichert ✓');
+}
+
+// ── Minimal 3D viewport placeholder ─────────────────────────────────────────
+const canvas = document.getElementById('viewport');
+function resizeCanvas() {
+  canvas.width  = canvas.offsetWidth;
+  canvas.height = canvas.offsetHeight;
+  drawPlaceholder();
+}
+
+function drawPlaceholder() {
+  const ctx = canvas.getContext('2d');
+  const w = canvas.width, h = canvas.height;
+  ctx.clearRect(0, 0, w, h);
+
+  // Grid
+  ctx.strokeStyle = 'rgba(255,255,255,.04)';
+  ctx.lineWidth   = 1;
+  for (let x = 0; x < w; x += 40) { ctx.beginPath(); ctx.moveTo(x,0); ctx.lineTo(x,h); ctx.stroke(); }
+  for (let y = 0; y < h; y += 40) { ctx.beginPath(); ctx.moveTo(0,y); ctx.lineTo(w,y); ctx.stroke(); }
+
+  // Placeholder figure
+  ctx.fillStyle    = 'rgba(200,240,96,.07)';
+  ctx.strokeStyle  = 'rgba(200,240,96,.25)';
+  ctx.lineWidth    = 1.5;
+  const cx = w/2, cy = h/2;
+  // Head
+  ctx.beginPath(); ctx.arc(cx, cy - 120, 30, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+  // Body
+  ctx.beginPath(); ctx.roundRect(cx-40, cy-85, 80, 130, 8); ctx.fill(); ctx.stroke();
+  // Arms
+  ctx.beginPath(); ctx.roundRect(cx-80, cy-80, 35, 100, 6); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.roundRect(cx+45, cy-80, 35, 100, 6); ctx.fill(); ctx.stroke();
+  // Legs
+  ctx.beginPath(); ctx.roundRect(cx-38, cy+48, 32, 110, 6); ctx.fill(); ctx.stroke();
+  ctx.beginPath(); ctx.roundRect(cx+6,  cy+48, 32, 110, 6); ctx.fill(); ctx.stroke();
+
+  ctx.fillStyle = 'rgba(200,240,96,.4)';
+  ctx.font = '13px "DM Mono", monospace';
+  ctx.textAlign = 'center';
+  ctx.fillText('3D-Viewer · Three.js integration', cx, h - 24);
+}
+
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+</script>
+{% endblock %}

@@ -1,0 +1,51 @@
+# ─────────────────────────────────────────────────────────────────────────────
+# SOMA Avatar System – CPU-only Dockerfile (development / no GPU)
+# ─────────────────────────────────────────────────────────────────────────────
+
+FROM python:3.11-slim AS base-ml
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    git wget curl \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    ffmpeg \
+    && rm -rf /var/lib/apt/lists/*
+
+RUN pip install --upgrade pip setuptools wheel
+
+COPY requirements-ml.txt /tmp/requirements-ml.txt
+RUN pip install \
+    torch==2.3.0 torchvision==0.18.0 \
+    --index-url https://download.pytorch.org/whl/cpu \
+    && pip install -r /tmp/requirements-ml.txt
+
+
+FROM base-ml AS fitting
+
+COPY requirements-fitting.txt /tmp/requirements-fitting.txt
+RUN pip install -r /tmp/requirements-fitting.txt
+# realesrgan needed for Stage 2.5 (texture super-res) – not yet implemented, skip for now
+# RUN pip install realesrgan 2>/dev/null || true
+
+
+FROM fitting AS app-deps
+
+COPY requirements.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt
+
+
+FROM app-deps AS app
+
+RUN groupadd -r soma && useradd -r -g soma -d /app -s /sbin/nologin soma
+WORKDIR /app
+COPY --chown=soma:soma . .
+RUN mkdir -p /app/avatar_data /app/video_data /app/media /app/staticfiles \
+    && chown -R soma:soma /app
+USER soma
+RUN python manage.py collectstatic --noinput 2>/dev/null || true
+EXPOSE 8000
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "avatar_system.asgi:application"]

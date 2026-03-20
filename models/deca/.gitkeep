@@ -1,0 +1,9 @@
+# DECA / FLAME model weights
+# Download from https://flame.is.tue.mpg.de/ and https://github.com/yfeng95/DECA
+#
+# Place these files here:
+#   deca_model.tar          ← DECA pre-trained weights
+#   FLAME2020.zip (extract) ← FLAME head model
+#     generic_model.pkl
+#     female_model.pkl
+#     male_model.pkl

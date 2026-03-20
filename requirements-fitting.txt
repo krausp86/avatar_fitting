@@ -1,0 +1,19 @@
+# Layer 2 – Fitting tools (moderately heavy, change occasionally)
+
+# Optical flow
+# raft-stereo installed separately via git (see Dockerfile)
+
+# Face fitting
+# deca, mica, emoca installed separately via git (see Dockerfile)
+
+# Texture enhancement
+# realesrgan installed separately via git (see Dockerfile)
+
+# Clothing segmentation
+# schp installed separately via git (see Dockerfile)
+
+smplx==0.1.28
+trimesh==4.3.2
+
+# Person detection
+mediapipe>=0.10.9

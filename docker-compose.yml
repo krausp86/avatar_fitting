@@ -1,0 +1,89 @@
+services:
+
+  # ── Redis (WebSocket channel layer) ────────────────────────────────────────
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── Django ASGI app ─────────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile          # use Dockerfile.cpu for no-GPU
+      target: app                     # build up to final stage
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    environment:
+      - DJANGO_SETTINGS_MODULE=avatar_system.settings
+      - DJANGO_SECRET_KEY=${DJANGO_SECRET_KEY:-change-me-in-production}
+      - DEBUG=${DEBUG:-1}
+      - REDIS_URL=redis://redis:6379/0
+      - AVATAR_DATA_ROOT=/data/avatars
+      - VIDEO_SCAN_ROOT=/data/videos
+      - MEDIA_ROOT=/data/media
+      # Point to the models volume – drop SMPLX_NEUTRAL.npz etc. under
+      # models/smplx/ on the host (see models/smplx/.gitkeep for layout)
+      - SMPLX_MODEL_DIR=/data/models
+    volumes:
+      # Persistent data – mount your actual training video folder here
+      - avatar_data:/data/avatars
+      - media_data:/data/media
+      - ${VIDEO_FOLDER:-./video_data}:/data/videos:ro   # read-only video source
+      # Model weights (not in git – download separately, see models/smplx/.gitkeep)
+      - ${MODELS_DIR:-./models}:/data/models:ro
+      # Live code reload in development
+      - .:/app:cached
+    ports:
+      - "${PORT:-8000}:8000"
+    command: >
+      sh -c "python manage.py migrate --noinput &&
+             daphne -b 0.0.0.0 -p 8000 --websocket_timeout 3600
+             avatar_system.asgi:application"
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  # ── Celery worker (optional – for async fitting jobs) ──────────────────────
+  # Uncomment when you replace threading.Thread in tasks.py with Celery
+  # worker:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #     target: app
+  #   restart: unless-stopped
+  #   depends_on:
+  #     - redis
+  #   environment:
+  #     - DJANGO_SETTINGS_MODULE=avatar_system.settings
+  #     - REDIS_URL=redis://redis:6379/0
+  #     - AVATAR_DATA_ROOT=/data/avatars
+  #     - VIDEO_SCAN_ROOT=/data/videos
+  #   volumes:
+  #     - avatar_data:/data/avatars
+  #     - ${VIDEO_FOLDER:-./video_data}:/data/videos:ro
+  #   command: celery -A avatar_system worker -l info --concurrency 1
+  #   deploy:
+  #     resources:
+  #       reservations:
+  #         devices:
+  #           - driver: nvidia
+  #             count: all
+  #             capabilities: [gpu]
+
+volumes:
+  redis_data:
+  avatar_data:
+  media_data:

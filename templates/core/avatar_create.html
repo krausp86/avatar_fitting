@@ -1,0 +1,47 @@
+{% extends "base.html" %}
+{% block title %}Avatar erstellen{% endblock %}
+{% block nav_create %}active{% endblock %}
+{% block page_title %}Neuer Avatar{% endblock %}
+
+{% block content %}
+<div style="max-width:520px">
+  <div class="card">
+    <div class="card-header">Avatar anlegen</div>
+    <div class="card-body">
+      <form method="post" action="{% url 'avatar_create' %}">
+        {% csrf_token %}
+        <div class="form-group">
+          <label>Name</label>
+          <input type="text" name="name" placeholder="z.B. Person A – Sommer 2024" autofocus required>
+          <div class="form-hint">Gilt für alle Versionen dieses Avatars</div>
+        </div>
+
+        <div class="form-group">
+          <label>Personen-Gruppe (optional)</label>
+          <select name="group_id">
+            <option value="">— Keine Gruppe —</option>
+            {% for g in groups %}
+            <option value="{{ g.pk }}">{{ g.label|default:"Unbenannt" }} ({{ g.pc }} Tracks)</option>
+            {% endfor %}
+          </select>
+          <div class="form-hint">Bestimmt welche Videos für das Fitting verwendet werden</div>
+        </div>
+
+        <div class="flex gap-8 mt-16">
+          <button type="submit" class="btn btn-primary">Avatar erstellen</button>
+          <a href="{% url 'avatar_list' %}" class="btn btn-ghost">Abbrechen</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  {% if not groups %}
+  <div class="card mt-16" style="border-color:var(--warn)">
+    <div class="card-body" style="color:var(--warn);font-size:.85rem">
+      ⚠ Noch keine Personen-Gruppen vorhanden.
+      <a href="{% url 'person_list' %}" style="color:inherit">Personen zusammenführen →</a>
+    </div>
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,115 @@
+{% extends "base.html" %}
+{% block title %}{{ group.label|default:"Gruppe" }}{% endblock %}
+{% block nav_persons %}active{% endblock %}
+{% block page_title %}{{ group.label|default:"Unbenannte Gruppe" }}{% endblock %}
+{% block page_sub %}{{ group.total_frames }} Frames gesamt · {{ persons|length }} Track(s){% endblock %}
+
+{% block topbar_actions %}
+<button class="btn btn-ghost btn-sm" onclick="openRenameModal()">Umbenennen</button>
+<a href="{% url 'avatar_create' %}?group={{ group.pk }}" class="btn btn-primary btn-sm">◌ Avatar erstellen</a>
+{% endblock %}
+
+{% block content %}
+<div class="grid-2" style="gap:24px;align-items:start">
+
+  <!-- Tracks -->
+  <div class="card">
+    <div class="card-header">
+      Tracks
+      <span class="text-muted text-mono text-sm">{{ persons|length }}</span>
+    </div>
+    <div class="card-body">
+      <div style="display:flex;flex-direction:column;gap:8px">
+        {% for person in persons %}
+        <div class="flex-center gap-12" style="padding:10px;border:1px solid var(--border);border-radius:var(--r)">
+          {% if person.thumbnail %}
+            <img src="{{ person.thumbnail.url }}" style="width:48px;height:48px;border-radius:4px;object-fit:cover;flex-shrink:0">
+          {% else %}
+            <div style="width:48px;height:48px;border-radius:4px;background:var(--border);display:flex;align-items:center;justify-content:center;color:var(--muted);flex-shrink:0">◉</div>
+          {% endif %}
+          <div style="flex:1;min-width:0">
+            <div class="fw-700 truncate">Track {{ person.track_id }}</div>
+            <div class="text-sm text-muted text-mono">{{ person.video.filename }}</div>
+            <div class="text-sm text-muted text-mono">{{ person.frame_count }} frames · {{ person.visibility|floatformat:0 }}% sichtbar</div>
+          </div>
+          <form method="post" action="{% url 'unmerge_person' group.pk person.pk %}" onsubmit="return confirm('Track entfernen?')">
+            {% csrf_token %}
+            <button class="btn btn-ghost btn-sm">✕ Entfernen</button>
+          </form>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+  <!-- Avatars + Actions -->
+  <div style="display:flex;flex-direction:column;gap:16px">
+
+    <div class="card">
+      <div class="card-header">Avatare dieser Gruppe</div>
+      <div class="card-body">
+        {% if avatars %}
+          {% for av in avatars %}
+          <a href="{% url 'avatar_detail' av.pk %}" style="text-decoration:none;color:inherit">
+            <div class="flex-center gap-12" style="padding:10px 0;border-bottom:1px solid var(--border)">
+              <div style="width:32px;height:32px;border-radius:4px;background:var(--border);display:flex;align-items:center;justify-content:center">◌</div>
+              <div style="flex:1;min-width:0">
+                <div class="fw-700 truncate">{{ av.name }}</div>
+                <div class="text-sm text-muted text-mono">v{{ av.version }}</div>
+              </div>
+              <span class="badge badge-{{ av.status }}">{{ av.get_status_display }}</span>
+            </div>
+          </a>
+          {% endfor %}
+        {% else %}
+          <div class="text-muted text-sm" style="padding:16px 0;text-align:center">Noch kein Avatar</div>
+        {% endif %}
+        <a href="{% url 'avatar_create' %}" class="btn btn-primary btn-sm" style="margin-top:12px;width:100%;justify-content:center">+ Avatar erstellen</a>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-header">Gruppe verwalten</div>
+      <div class="card-body">
+        <form method="post" action="{% url 'group_delete' group.pk %}" onsubmit="return confirm('Gruppe löschen? Avatare bleiben erhalten.')">
+          {% csrf_token %}
+          <button class="btn btn-danger btn-sm" style="width:100%;justify-content:center">Gruppe löschen</button>
+        </form>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rename Modal -->
+<div id="renameModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center">
+  <div class="card" style="width:380px">
+    <div class="card-header">Gruppe umbenennen</div>
+    <div class="card-body">
+      <div class="form-group">
+        <label>Name</label>
+        <input type="text" id="newLabel" value="{{ group.label }}">
+      </div>
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="doRename()">Speichern</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('renameModal').style.display='none'">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function openRenameModal() { document.getElementById('renameModal').style.display = 'flex'; }
+
+async function doRename() {
+  const label = document.getElementById('newLabel').value.trim();
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  fd.append('label', label);
+  // TODO: add rename endpoint for groups
+  toast('Umbenannt (TODO: persist)');
+  document.getElementById('renameModal').style.display = 'none';
+}
+</script>
+{% endblock %}

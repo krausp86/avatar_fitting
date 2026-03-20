@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% block title %}Avatare{% endblock %}
+{% block nav_avatars %}active{% endblock %}
+{% block page_title %}Avatar-Bibliothek{% endblock %}
+{% block page_sub %}{{ avatars|length }} Avatar(e){% endblock %}
+
+{% block topbar_actions %}
+<a href="{% url 'avatar_create' %}" class="btn btn-primary btn-sm">+ Neuer Avatar</a>
+{% endblock %}
+
+{% block content %}
+{% if avatars %}
+<div class="avatar-grid">
+  {% for av in avatars %}
+  <a href="{% url 'avatar_detail' av.pk %}" class="avatar-card">
+    <div class="avatar-preview">
+      {% if av.thumbnail %}
+        <img src="{{ av.thumbnail.url }}" style="width:100%;height:100%;object-fit:cover">
+      {% else %}◌{% endif %}
+    </div>
+    <div class="avatar-card-body">
+      <div class="avatar-card-name">{{ av.name }}</div>
+      <div class="avatar-card-meta">v{{ av.version }} · <span class="badge badge-{{ av.status }}">{{ av.get_status_display }}</span></div>
+      {% if av.group %}
+      <div class="avatar-card-meta mt-4">{{ av.group.label|default:"Unbenannte Gruppe" }}</div>
+      {% endif %}
+    </div>
+  </a>
+  {% endfor %}
+</div>
+{% else %}
+<div style="text-align:center;padding:80px 20px;color:var(--muted)">
+  <div style="font-size:4rem;margin-bottom:16px">◌</div>
+  <div style="font-size:1rem;font-weight:700;margin-bottom:8px">Noch keine Avatare</div>
+  <div class="text-sm">Erstelle einen Avatar aus einer Personen-Gruppe oder manuell.</div>
+  <a href="{% url 'avatar_create' %}" class="btn btn-primary" style="margin-top:20px">+ Ersten Avatar erstellen</a>
+</div>
+{% endif %}
+{% endblock %}

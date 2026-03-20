@@ -188,6 +188,15 @@ cython_debug/
 #  you could uncomment the following to ignore the entire vscode folder
 # .vscode/
 
+# Model weights (large binary files, download separately)
+models/smplx/*.npz
+models/smplx/*.pkl
+models/smplx/*.npy
+models/deca/*.tar
+models/deca/*.pkl
+models/deca/*.pt
+models/deca/*.pth
+
 # Ruff stuff:
 .ruff_cache/
 

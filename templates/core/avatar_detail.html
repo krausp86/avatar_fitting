@@ -1,0 +1,341 @@
+{% extends "base.html" %}
+{% block title %}{{ avatar.name }}{% endblock %}
+{% block nav_avatars %}active{% endblock %}
+{% block page_title %}{{ avatar.name }} <span style="color:var(--muted);font-weight:400">v{{ avatar.version }}</span>{% endblock %}
+{% block page_sub %}{{ avatar.get_status_display }} · {{ avatar.updated_at|date:"d.m.Y H:i" }}{% endblock %}
+
+{% block topbar_actions %}
+<a href="{% url 'avatar_edit' avatar.pk %}" class="btn btn-primary btn-sm">✎ Editor</a>
+<button class="btn btn-secondary btn-sm" onclick="openFitModal()">⚙ Fitting starten</button>
+<button class="btn btn-ghost btn-sm" onclick="exportAvatar()">↓ Export</button>
+<button class="btn btn-ghost btn-sm" onclick="openRenameModal()">Umbenennen</button>
+<form method="post" action="{% url 'avatar_fork' avatar.pk %}" style="display:inline">
+  {% csrf_token %}
+  <button class="btn btn-ghost btn-sm">⎇ Fork</button>
+</form>
+<form method="post" action="{% url 'avatar_delete' avatar.pk %}" style="display:inline" onsubmit="return confirm('Version löschen?')">
+  {% csrf_token %}
+  <button class="btn btn-danger btn-sm">✕</button>
+</form>
+{% endblock %}
+
+{% block content %}
+<div class="grid-2" style="gap:24px;align-items:start">
+
+  <!-- Left: Status + Jobs + Edits -->
+  <div style="display:flex;flex-direction:column;gap:16px">
+
+    <!-- Status card -->
+    <div class="card">
+      <div class="card-header">Status</div>
+      <div class="card-body">
+        <div class="flex-center gap-12 mb-16">
+          <span class="badge badge-{{ avatar.status }}" style="font-size:.85rem;padding:5px 14px">{{ avatar.get_status_display }}</span>
+          {% if avatar.group %}
+          <a href="{% url 'group_detail' avatar.group.pk %}" class="text-sm text-muted">◉ {{ avatar.group.label|default:"Unbenannte Gruppe" }}</a>
+          {% endif %}
+        </div>
+        {% if avatar.notes %}
+        <div class="text-sm text-muted" style="font-style:italic">{{ avatar.notes }}</div>
+        {% endif %}
+      </div>
+    </div>
+
+    <!-- Active job monitor -->
+    <div class="card" id="jobMonitor" style="display:none">
+      <div class="card-header">
+        Fitting läuft…
+        <span id="jobStageLabel" class="text-mono text-sm text-muted"></span>
+      </div>
+      <div class="card-body">
+        <div class="progress-bar mb-16">
+          <div class="progress-fill running" id="jobProgressBar" style="width:0%"></div>
+        </div>
+        <div class="stage-list" id="stageList"></div>
+        <canvas id="lossCanvas" class="loss-canvas mt-16"></canvas>
+        <img id="previewImg" style="display:none;width:100%;border-radius:4px;margin-top:12px;border:1px solid var(--border)" alt="Vorschau">
+      </div>
+    </div>
+
+    <!-- Recent jobs -->
+    {% if jobs %}
+    <div class="card">
+      <div class="card-header">Letzte Jobs</div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <thead><tr><th>Status</th><th>Stage</th><th>Gestartet</th></tr></thead>
+          <tbody>
+          {% for job in jobs %}
+          <tr>
+            <td><span class="badge badge-{{ job.status }}">{{ job.status }}</span></td>
+            <td class="text-mono text-sm">{{ job.current_stage|default:"—" }}</td>
+            <td class="text-mono text-sm text-muted">{{ job.started_at|date:"d.m H:i"|default:"—" }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+
+    <!-- Edits -->
+    {% if edits %}
+    <div class="card">
+      <div class="card-header">Editor-Änderungen</div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <thead><tr><th>Label</th><th>Erstellt</th></tr></thead>
+          <tbody>
+          {% for edit in edits %}
+          <tr>
+            <td class="fw-700">{{ edit.label|default:"Unbenannt" }}</td>
+            <td class="text-mono text-sm text-muted">{{ edit.created_at|date:"d.m H:i" }}</td>
+          </tr>
+          {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </div>
+    {% endif %}
+  </div>
+
+  <!-- Right: Version timeline -->
+  <div class="card">
+    <div class="card-header">
+      Versionen
+      <span class="text-muted text-mono text-sm">{{ versions|length }}</span>
+    </div>
+    <div class="card-body">
+      <div class="version-list">
+        {% for v in versions %}
+        <div class="version-item {% if v.pk == avatar.pk %}current{% endif %}">
+          <div class="version-dot"></div>
+          <div class="version-info">
+            <div class="version-label">
+              <a href="{% url 'avatar_detail' v.pk %}" style="color:inherit;text-decoration:none">
+                v{{ v.version }}
+                {% if v.pk == avatar.pk %}<span class="text-accent text-mono text-sm"> ← aktuell</span>{% endif %}
+              </a>
+            </div>
+            <div class="version-meta">{{ v.created_at|date:"d.m.Y H:i" }}{% if v.notes %} · {{ v.notes }}{% endif %}</div>
+          </div>
+          <span class="badge badge-{{ v.status }}">{{ v.get_status_display }}</span>
+        </div>
+        {% endfor %}
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- Fit Modal -->
+<div id="fitModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center">
+  <div class="card" style="width:500px;max-height:90vh;overflow-y:auto">
+    <div class="card-header">Fitting konfigurieren</div>
+    <div class="card-body">
+
+      <div class="form-group">
+        <label>Stages</label>
+        <div class="check-grid">
+          {% for s,name in "1:SMPL-X Fit,1.5:Face,2:Statisch,2.5:Textur,3:Cage,4:Physik,5:PriorMLP"|split:"," %}
+          {% endfor %}
+          <label class="check-card"><input type="checkbox" name="stages" value="1" checked> Stage 1 – SMPL-X</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="1.5" checked> Stage 1.5 – Gesicht</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="2" checked> Stage 2 – Offsets</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="2.5" checked> Stage 2.5 – Textur</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="3" checked> Stage 3 – Cage</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="4" checked> Stage 4 – Physik</label>
+          <label class="check-card"><input type="checkbox" name="stages" value="5"> Stage 5 – PriorMLP</label>
+        </div>
+      </div>
+
+      <div class="grid-2" style="gap:12px">
+        <div class="form-group">
+          <label>Statisch-Schwelle</label>
+          <input type="number" name="static_threshold" value="0.05" step="0.01" min="0.01" max="0.5">
+        </div>
+        <div class="form-group">
+          <label>Cage-Vertices (N)</label>
+          <input type="number" name="n_cage" value="60" min="20" max="200">
+        </div>
+        <div class="form-group">
+          <label>Textur Körper (px)</label>
+          <select name="tex_res_body">
+            <option value="512">512</option>
+            <option value="1024" selected>1024</option>
+            <option value="2048">2048</option>
+          </select>
+        </div>
+        <div class="form-group">
+          <label>Textur Gesicht (px)</label>
+          <select name="tex_res_face">
+            <option value="1024">1024</option>
+            <option value="2048" selected>2048</option>
+            <option value="4096">4096</option>
+          </select>
+        </div>
+      </div>
+
+      <div class="form-group">
+        <label>Haar-Rekonstruktion</label>
+        <select name="hair_recon">
+          <option value="mesh">Mesh-basiert (schnell, robust)</option>
+          <option value="neuralhaircut">NeuralHaircut (realistisch, langsam)</option>
+          <option value="gaussian">Gaussian Splatting</option>
+          <option value="none">Keine</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>Inpainting</label>
+        <select name="inpainting">
+          <option value="prior">Body-Normal-Prior (deterministisch)</option>
+          <option value="paint3d">Paint3D</option>
+          <option value="none">Keines</option>
+        </select>
+      </div>
+
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="startFitting()">Fitting starten</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('fitModal').style.display='none'">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- Rename Modal -->
+<div id="renameModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center">
+  <div class="card" style="width:380px">
+    <div class="card-header">Avatar umbenennen</div>
+    <div class="card-body">
+      <div class="form-group">
+        <label>Neuer Name</label>
+        <input type="text" id="newName" value="{{ avatar.name }}">
+        <div class="form-hint">Gilt für alle Versionen dieses Avatars</div>
+      </div>
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="doRename()">Umbenennen</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('renameModal').style.display='none'">Abbrechen</button>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const AVATAR_ID = '{{ avatar.pk }}';
+const FIT_URL   = '{% url "avatar_fit" avatar.pk %}';
+const RENAME_URL = '{% url "avatar_rename" avatar.pk %}';
+let   ws, lossHistory = [], lossCtx;
+
+function openFitModal()    { document.getElementById('fitModal').style.display    = 'flex'; }
+function openRenameModal() { document.getElementById('renameModal').style.display = 'flex'; }
+
+async function startFitting() {
+  document.getElementById('fitModal').style.display = 'none';
+
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  document.querySelectorAll('input[name=stages]:checked').forEach(el => fd.append('stages', el.value));
+  ['static_threshold','n_cage','tex_res_body','tex_res_face','inpainting'].forEach(n => {
+    const el = document.querySelector(`[name=${n}]`);
+    if (el) fd.append(n, el.value);
+  });
+
+  const r = await fetch(FIT_URL, { method: 'POST', body: fd });
+  const d = await r.json();
+  if (!d.job_id) { toast('Fehler beim Starten', 'error'); return; }
+
+  document.getElementById('jobMonitor').style.display = '';
+  connectWS(d.job_id);
+  toast('Fitting gestartet');
+}
+
+function connectWS(jobId) {
+  ws = new WebSocket(`ws://${location.host}/ws/job/${jobId}/`);
+  ws.onmessage = (e) => handleProgress(JSON.parse(e.data));
+}
+
+const stageNames = {'1':'SMPL-X Fit','1.5':'Gesicht','2':'Offsets','2.5':'Textur','3':'Cage','4':'Physik','5':'PriorMLP'};
+const stageDone  = new Set();
+
+function handleProgress(d) {
+  if (d.type === 'progress') {
+    document.getElementById('jobStageLabel').textContent = d.stage_name;
+    const pct = ((d.epoch / d.total_epochs) * 100).toFixed(0);
+    document.getElementById('jobProgressBar').style.width = pct + '%';
+    updateStageList(d.stage, pct, d.loss);
+    lossHistory.push(d.loss);
+    drawLoss();
+    if (d.preview_jpg) {
+      const img = document.getElementById('previewImg');
+      img.src   = 'data:image/jpeg;base64,' + d.preview_jpg;
+      img.style.display = '';
+    }
+  }
+  if (d.type === 'stage_complete') { stageDone.add(d.stage); updateStageList(d.stage, 100, null, true); }
+  if (d.type === 'complete') { toast('Fitting abgeschlossen ✓'); setTimeout(() => location.reload(), 1500); }
+  if (d.type === 'error')    { toast('Fehler: ' + d.error, 'error'); }
+}
+
+function updateStageList(activeStage, pct, loss, done) {
+  const list = document.getElementById('stageList');
+  ['1','1.5','2','2.5','3','4','5'].forEach(s => {
+    let item = document.getElementById('stage-' + s);
+    if (!item) {
+      item = document.createElement('div');
+      item.id = 'stage-' + s;
+      item.className = 'stage-item';
+      item.innerHTML = `<div class="stage-dot"></div><span>${stageNames[s] || 'Stage '+s}</span><span class="stage-loss"></span>`;
+      list.appendChild(item);
+    }
+    const isActive = s === activeStage && !done;
+    const isDone   = stageDone.has(s) || (s === activeStage && done);
+    item.classList.toggle('active', isActive);
+    item.classList.toggle('done',   isDone);
+    if (s === activeStage && loss !== null) item.querySelector('.stage-loss').textContent = 'loss ' + loss.toFixed(4);
+  });
+}
+
+function drawLoss() {
+  const canvas = document.getElementById('lossCanvas');
+  if (!lossCtx) lossCtx = canvas.getContext('2d');
+  const w = canvas.offsetWidth, h = 120;
+  canvas.width = w; canvas.height = h;
+  const ctx = lossCtx;
+  ctx.clearRect(0, 0, w, h);
+
+  if (lossHistory.length < 2) return;
+  const max = Math.max(...lossHistory);
+  const min = Math.min(...lossHistory);
+  const range = max - min || 1;
+
+  ctx.beginPath();
+  ctx.strokeStyle = getComputedStyle(document.documentElement).getPropertyValue('--accent2');
+  ctx.lineWidth = 1.5;
+  lossHistory.forEach((v, i) => {
+    const x = (i / (lossHistory.length - 1)) * w;
+    const y = h - ((v - min) / range) * (h - 10) - 5;
+    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y);
+  });
+  ctx.stroke();
+}
+
+async function doRename() {
+  const name = document.getElementById('newName').value.trim();
+  if (!name) return;
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  fd.append('name', name);
+  await fetch(RENAME_URL, { method: 'POST', body: fd });
+  toast('Umbenannt');
+  setTimeout(() => location.reload(), 600);
+}
+
+function exportAvatar() {
+  // Trigger ZIP download of avatar data folder
+  window.location = `/api/avatar/${AVATAR_ID}/export/`;
+}
+</script>
+{% endblock %}

@@ -1,0 +1,106 @@
+{% extends "base.html" %}
+{% block title %}Videos{% endblock %}
+{% block nav_videos %}active{% endblock %}
+{% block page_title %}Videos{% endblock %}
+{% block page_sub %}{{ scan_root }}{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn btn-secondary btn-sm" onclick="document.getElementById('scanModal').style.display='flex'">
+  ⟳ Ordner scannen
+</button>
+{% endblock %}
+
+{% block content %}
+{% if folders %}
+<div class="flex-center gap-8 mb-16" style="flex-wrap:wrap">
+  <button class="btn btn-ghost btn-sm active-folder" data-folder="all" onclick="filterFolder('all',this)">Alle ({{ videos|length }})</button>
+  {% for f in folders %}
+  <button class="btn btn-ghost btn-sm" data-folder="{{ f.folder }}" onclick="filterFolder('{{ f.folder }}',this)">
+    {{ f.folder }} <span class="text-muted">({{ f.count }})</span>
+  </button>
+  {% endfor %}
+</div>
+{% endif %}
+
+<div class="card">
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Datei</th>
+          <th>Ordner</th>
+          <th>Dauer</th>
+          <th>FPS</th>
+          <th>Auflösung</th>
+          <th>Personen</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for v in videos %}
+        <tr data-folder="{{ v.folder }}">
+          <td class="fw-700">{{ v.filename }}</td>
+          <td class="text-muted text-mono text-sm">{{ v.folder }}</td>
+          <td class="text-mono text-sm">
+            {% if v.duration_s %}{{ v.duration_s|floatformat:1 }}s{% else %}—{% endif %}
+          </td>
+          <td class="text-mono text-sm">
+            {% if v.fps %}{{ v.fps|floatformat:0 }}{% else %}—{% endif %}
+          </td>
+          <td class="text-mono text-sm">{{ v.resolution|default:"—" }}</td>
+          <td>
+            {% with cnt=v.persons.count %}
+            {% if cnt %}<span class="badge badge-done">{{ cnt }}</span>{% else %}<span class="text-muted">—</span>{% endif %}
+            {% endwith %}
+          </td>
+          <td><a href="{% url 'video_detail' v.pk %}" class="btn btn-ghost btn-sm">Details →</a></td>
+        </tr>
+        {% empty %}
+        <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)">Keine Videos gefunden. Ordner scannen.</td></tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- Scan Modal -->
+<div id="scanModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.7);z-index:200;align-items:center;justify-content:center">
+  <div class="card" style="width:440px">
+    <div class="card-header">Ordner scannen</div>
+    <div class="card-body">
+      <div class="form-group">
+        <label>Pfad</label>
+        <input type="text" id="scanPath" value="{{ scan_root }}">
+        <div class="form-hint">Alle Unterordner werden rekursiv gescannt</div>
+      </div>
+      <div class="flex gap-8 mt-16">
+        <button class="btn btn-primary" onclick="doScan()">Scannen</button>
+        <button class="btn btn-ghost" onclick="document.getElementById('scanModal').style.display='none'">Abbrechen</button>
+        <span id="scanResult" class="text-mono text-sm text-muted ml-auto" style="align-self:center"></span>
+      </div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+function filterFolder(folder, btn) {
+  document.querySelectorAll('.active-folder').forEach(b => b.classList.remove('active-folder'));
+  btn.classList.add('active-folder');
+  document.querySelectorAll('tr[data-folder]').forEach(row => {
+    row.style.display = (folder === 'all' || row.dataset.folder === folder) ? '' : 'none';
+  });
+}
+
+async function doScan() {
+  const path = document.getElementById('scanPath').value;
+  const res  = document.getElementById('scanResult');
+  res.textContent = 'Scanning…';
+  const r = await post('{% url "scan_videos" %}', {folder: path});
+  const d = await r.json();
+  res.textContent = `${d.added} neue Videos`;
+  if (d.added > 0) setTimeout(() => location.reload(), 1000);
+}
+</script>
+{% endblock %}

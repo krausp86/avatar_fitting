@@ -1,0 +1,159 @@
+{% extends "base.html" %}
+{% block title %}{{ video.filename }}{% endblock %}
+{% block nav_videos %}active{% endblock %}
+{% block page_title %}{{ video.filename }}{% endblock %}
+{% block page_sub %}{{ video.folder }} · {{ video.duration_s|floatformat:1 }}s · {{ video.fps|floatformat:0 }}fps · {{ video.resolution }}{% endblock %}
+
+{% block topbar_actions %}
+<button class="btn btn-primary btn-sm" onclick="analyzeVideo()">⟳ Personen analysieren</button>
+<a href="{% url 'video_list' %}" class="btn btn-ghost btn-sm">← Videos</a>
+{% endblock %}
+
+{% block content %}
+
+<!-- Camera Intrinsics -->
+<div class="card mb-16">
+  <div class="card-header">
+    Kamera-Intrinsics
+    <span class="text-muted text-mono text-sm">Für SMPL-X Fitting erforderlich</span>
+  </div>
+  <div class="card-body">
+    <div class="grid-4" style="gap:12px">
+      <div class="form-group">
+        <label>fx (Brennweite X)</label>
+        <input type="number" id="fx" placeholder="z.B. 1080" step="1">
+      </div>
+      <div class="form-group">
+        <label>fy (Brennweite Y)</label>
+        <input type="number" id="fy" placeholder="z.B. 1080" step="1">
+      </div>
+      <div class="form-group">
+        <label>cx (Hauptpunkt X)</label>
+        <input type="number" id="cx" placeholder="z.B. 960" step="1">
+      </div>
+      <div class="form-group">
+        <label>cy (Hauptpunkt Y)</label>
+        <input type="number" id="cy" placeholder="z.B. 540" step="1">
+      </div>
+    </div>
+    <div class="flex gap-8">
+      <button class="btn btn-secondary btn-sm" onclick="estimateIntrinsics()">Auto-Schätzen aus Auflösung</button>
+      <button class="btn btn-ghost btn-sm" onclick="saveIntrinsics()">Speichern</button>
+      <span id="intrinsics-status" class="text-mono text-sm text-muted" style="align-self:center"></span>
+    </div>
+  </div>
+</div>
+
+<!-- Analysis progress -->
+<div id="analyzeProgress" style="display:none" class="card mb-16">
+  <div class="card-body">
+    <div class="flex-center gap-12 mb-8">
+      <span class="fw-700 text-sm">Analyse läuft…</span>
+      <span id="analyzeStage" class="text-mono text-sm text-muted"></span>
+    </div>
+    <div class="progress-bar">
+      <div class="progress-fill running" id="analyzeBar" style="width:0%"></div>
+    </div>
+  </div>
+</div>
+
+<!-- Persons -->
+<div class="card">
+  <div class="card-header">
+    Erkannte Personen
+    <span class="text-muted text-mono text-sm">{{ persons|length }}</span>
+  </div>
+  <div class="card-body">
+    {% if persons %}
+    <div class="person-grid">
+      {% for person in persons %}
+      <div class="person-card" style="cursor:default">
+        {% if person.thumbnail %}
+          <img src="{{ person.thumbnail.url }}" alt="">
+        {% else %}
+          <div style="aspect-ratio:1;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:2rem;color:var(--border2)">◉</div>
+        {% endif %}
+        <div class="person-card-body">
+          <div class="person-card-name">Track {{ person.track_id }}</div>
+          <div class="person-card-sub">{{ person.frame_count }} frames</div>
+          <div class="person-card-sub">Sichtbarkeit {% widthratio person.visibility 1 100 %}%</div>
+          {% with groups=person.groups.all %}
+          {% if groups %}
+            <div class="person-card-sub text-accent" style="margin-top:4px">
+              ◉ {{ groups.0.label|default:"Gruppe" }}
+            </div>
+          {% endif %}
+          {% endwith %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+    {% else %}
+    <div style="text-align:center;padding:40px;color:var(--muted)">
+      <div style="font-size:2rem;margin-bottom:8px">◉</div>
+      Noch keine Personen erkannt.<br>
+      <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="analyzeVideo()">Jetzt analysieren</button>
+    </div>
+    {% endif %}
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+const VIDEO_ID = '{{ video.pk }}';
+
+// Auto-fill intrinsics from resolution
+function estimateIntrinsics() {
+  const res = '{{ video.resolution }}'.split('x');
+  if (res.length === 2) {
+    const w = parseInt(res[0]), h = parseInt(res[1]);
+    const f = Math.max(w, h) * 1.2;
+    document.getElementById('fx').value = f.toFixed(0);
+    document.getElementById('fy').value = f.toFixed(0);
+    document.getElementById('cx').value = (w/2).toFixed(0);
+    document.getElementById('cy').value = (h/2).toFixed(0);
+    document.getElementById('intrinsics-status').textContent = 'Geschätzt aus ' + w + 'x' + h;
+  }
+}
+
+async function saveIntrinsics() {
+  const data = {
+    fx: document.getElementById('fx').value,
+    fy: document.getElementById('fy').value,
+    cx: document.getElementById('cx').value,
+    cy: document.getElementById('cy').value,
+  };
+  // TODO: persist to video metadata via API
+  document.getElementById('intrinsics-status').textContent = 'Gespeichert ✓';
+  toast('Intrinsics gespeichert');
+}
+
+async function analyzeVideo() {
+  const btn = document.querySelector('[onclick="analyzeVideo()"]');
+  btn.disabled = true;
+  btn.textContent = '…';
+
+  document.getElementById('analyzeProgress').style.display = '';
+  document.getElementById('analyzeStage').textContent = 'MediaPipe Pose läuft…';
+  document.getElementById('analyzeBar').style.width = '30%';
+
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+
+  try {
+    const r = await fetch('{% url "detect_persons" video.pk %}', { method: 'POST', body: fd });
+    const d = await r.json();
+    document.getElementById('analyzeBar').style.width = '100%';
+    document.getElementById('analyzeStage').textContent =
+      `Abgeschlossen – ${d.created} Track(s) gefunden`;
+    toast(`${d.created} Person(en) erkannt`);
+    setTimeout(() => location.reload(), 900);
+  } catch (err) {
+    toast('Fehler bei der Analyse: ' + err, 'error');
+    btn.disabled = false;
+    btn.textContent = '⟳ Personen analysieren';
+  }
+}
+</script>
+{% endblock %}

@@ -1,0 +1,18 @@
+# Download SMPL-X model files from https://smpl-x.is.tue.mpg.de/
+# (free registration required, academic/non-commercial license)
+#
+# Place these files in this directory:
+#
+#   SMPLX_NEUTRAL.npz    ← required
+#   SMPLX_MALE.npz       ← required
+#   SMPLX_FEMALE.npz     ← required
+#
+# Usage in code:
+#   import smplx
+#   model = smplx.create(
+#       model_path = settings.SMPLX_MODEL_DIR,   # points to models/
+#       model_type = 'smplx',
+#       gender     = 'neutral',
+#       num_betas  = 10,
+#       use_pca    = False,
+#   )
