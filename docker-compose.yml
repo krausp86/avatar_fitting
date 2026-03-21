@@ -36,6 +36,7 @@ services:
       - DATABASE_URL=/data/db/db.sqlite3
       - MEDIAPIPE_DISABLE_GPU=1
       - TZ=Europe/Vienna
+      - HOME=/tmp
     volumes:
       - db_data:/data/db
       # Persistent data – mount your actual training video folder here

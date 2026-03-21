@@ -199,6 +199,8 @@ def video_debug_frame(request, pk):
         seg_vis = frame.copy()
         if mp_result.segmentation_masks:
             mask = mp_result.segmentation_masks[0].numpy_view()
+            if mask.ndim == 3:
+                mask = mask[:, :, 0]
             mask_bin = (mask > 0.5).astype(np.uint8)
             overlay = seg_vis.copy()
             overlay[mask_bin == 1] = [0, 160, 80]
