@@ -35,6 +35,7 @@ services:
       - SMPLX_MODEL_DIR=/data/models
       - DATABASE_URL=/data/db/db.sqlite3
       - MEDIAPIPE_DISABLE_GPU=1
+      - TZ=Europe/Vienna
     volumes:
       - db_data:/data/db
       # Persistent data – mount your actual training video folder here
