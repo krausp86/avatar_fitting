@@ -6,6 +6,7 @@
 
 {% block topbar_actions %}
 <button class="btn btn-ghost btn-sm" onclick="openRenameModal()">Umbenennen</button>
+{% if other_groups %}<button class="btn btn-ghost btn-sm" onclick="openMergeModal()">⊕ Mergen</button>{% endif %}
 <a href="{% url 'avatar_create' %}?group={{ group.pk }}" class="btn btn-primary btn-sm">◌ Avatar erstellen</a>
 {% endblock %}
 
@@ -85,14 +86,42 @@
   <div class="card" style="width:380px">
     <div class="card-header">Gruppe umbenennen</div>
     <div class="card-body">
-      <div class="form-group">
-        <label>Name</label>
-        <input type="text" id="newLabel" value="{{ group.label }}">
-      </div>
-      <div class="flex gap-8 mt-16">
-        <button class="btn btn-primary" onclick="doRename()">Speichern</button>
-        <button class="btn btn-ghost" onclick="document.getElementById('renameModal').style.display='none'">Abbrechen</button>
-      </div>
+      <form method="post" action="{% url 'group_rename' group.pk %}">
+        {% csrf_token %}
+        <div class="form-group">
+          <label>Name</label>
+          <input type="text" name="label" id="newLabel" value="{{ group.label }}">
+        </div>
+        <div class="flex gap-8 mt-16">
+          <button type="submit" class="btn btn-primary">Speichern</button>
+          <button type="button" class="btn btn-ghost" onclick="document.getElementById('renameModal').style.display='none'">Abbrechen</button>
+        </div>
+      </form>
+    </div>
+  </div>
+</div>
+
+<!-- Merge Modal -->
+<div id="mergeModal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.75);z-index:200;align-items:center;justify-content:center">
+  <div class="card" style="width:420px">
+    <div class="card-header">Gruppe zusammenführen</div>
+    <div class="card-body">
+      <form method="post" action="{% url 'group_merge' group.pk %}" onsubmit="return confirm('Andere Gruppe wird gelöscht und deren Tracks hierher verschoben.')">
+        {% csrf_token %}
+        <div class="form-group">
+          <label>Andere Gruppe</label>
+          <select name="other_group_id">
+            {% for g in other_groups %}
+            <option value="{{ g.pk }}">{{ g.label|default:"Unbenannt" }} ({{ g.persons.count }} Tracks)</option>
+            {% endfor %}
+          </select>
+          <div class="form-hint">Alle Tracks der gewählten Gruppe werden in diese Gruppe verschoben. Die andere Gruppe wird danach gelöscht.</div>
+        </div>
+        <div class="flex gap-8 mt-16">
+          <button type="submit" class="btn btn-primary">Zusammenführen</button>
+          <button type="button" class="btn btn-ghost" onclick="document.getElementById('mergeModal').style.display='none'">Abbrechen</button>
+        </div>
+      </form>
     </div>
   </div>
 </div>
@@ -101,15 +130,6 @@
 {% block extra_js %}
 <script>
 function openRenameModal() { document.getElementById('renameModal').style.display = 'flex'; }
-
-async function doRename() {
-  const label = document.getElementById('newLabel').value.trim();
-  const fd = new FormData();
-  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
-  fd.append('label', label);
-  // TODO: add rename endpoint for groups
-  toast('Umbenannt (TODO: persist)');
-  document.getElementById('renameModal').style.display = 'none';
-}
+function openMergeModal()  { document.getElementById('mergeModal').style.display  = 'flex'; }
 </script>
 {% endblock %}

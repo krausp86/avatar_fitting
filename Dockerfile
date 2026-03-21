@@ -119,7 +119,8 @@ RUN mkdir -p \
     /app/video_data \
     /app/media \
     /app/staticfiles \
-    && chown -R soma:soma /app
+    /data/db \
+    && chown -R soma:soma /app /data
 
 USER soma
 

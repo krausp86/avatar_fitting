@@ -12,6 +12,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git wget curl \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
+    libgles2 libegl1 libgbm1 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
@@ -40,12 +41,9 @@ RUN pip install -r /tmp/requirements.txt
 
 FROM app-deps AS app
 
-RUN groupadd -r soma && useradd -r -g soma -d /app -s /sbin/nologin soma
 WORKDIR /app
-COPY --chown=soma:soma . .
-RUN mkdir -p /app/avatar_data /app/video_data /app/media /app/staticfiles \
-    && chown -R soma:soma /app
-USER soma
+COPY . .
+RUN mkdir -p /app/avatar_data /app/video_data /app/media /app/staticfiles /data/db
 RUN python manage.py collectstatic --noinput 2>/dev/null || true
 EXPOSE 8000
 CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "avatar_system.asgi:application"]

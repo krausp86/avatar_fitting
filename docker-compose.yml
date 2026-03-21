@@ -32,11 +32,9 @@ services:
       - AVATAR_DATA_ROOT=/data/avatars
       - VIDEO_SCAN_ROOT=/data/videos
       - MEDIA_ROOT=/data/media
-      # Point to the models volume – drop SMPLX_NEUTRAL.npz etc. under
-      # models/smplx/ on the host (see models/smplx/.gitkeep for layout)
       - SMPLX_MODEL_DIR=/data/models
-    environment:
       - DATABASE_URL=/data/db/db.sqlite3
+      - MEDIAPIPE_DISABLE_GPU=1
     volumes:
       - db_data:/data/db
       # Persistent data – mount your actual training video folder here

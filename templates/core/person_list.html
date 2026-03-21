@@ -84,11 +84,20 @@
     <div class="card-header">Personen zusammenführen</div>
     <div class="card-body">
       <div class="form-group">
-        <label>Name / Label</label>
+        <label>Zielgruppe</label>
+        <select id="mergeTarget" onchange="toggleNewLabel()">
+          <option value="">— Neue Gruppe erstellen —</option>
+          {% for group in groups %}
+          <option value="{{ group.pk }}">{{ group.label|default:"Unbenannt" }} ({{ group.person_count }} Tracks)</option>
+          {% endfor %}
+        </select>
+      </div>
+      <div class="form-group" id="newLabelGroup">
+        <label>Name der neuen Gruppe</label>
         <input type="text" id="mergeLabel" placeholder="z.B. Person A">
         <div class="form-hint">Optional – kann später geändert werden</div>
       </div>
-      <div id="mergePreview" style="margin-bottom:16px;font-size:.8rem;color:var(--muted);font-family:var(--mono)"></div>
+      <div id="mergePreview" style="margin-bottom:16px;font-size:13px;color:#888;font-family:monospace"></div>
       <div class="flex gap-8">
         <button class="btn btn-primary" onclick="doMerge()">Zusammenführen</button>
         <button class="btn btn-ghost" onclick="document.getElementById('mergeModal').style.display='none'">Abbrechen</button>
@@ -121,21 +130,29 @@ function clearSelection() {
   updateUI();
 }
 
+function toggleNewLabel() {
+  const existing = document.getElementById('mergeTarget').value;
+  document.getElementById('newLabelGroup').style.display = existing ? 'none' : '';
+}
+
 function openMergeModal() {
-  document.getElementById('mergePreview').textContent = `${selected.size} Tracks werden zusammengeführt`;
+  document.getElementById('mergePreview').textContent = `${selected.size} Track(s) werden hinzugefügt`;
   document.getElementById('mergeModal').style.display = 'flex';
+  toggleNewLabel();
 }
 
 async function doMerge() {
-  const label = document.getElementById('mergeLabel').value;
-  const fd    = new FormData();
+  const label    = document.getElementById('mergeLabel').value;
+  const existing = document.getElementById('mergeTarget').value;
+  const fd = new FormData();
   fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
   fd.append('label', label);
+  if (existing) fd.append('existing_group_id', existing);
   selected.forEach(id => fd.append('person_ids', id));
   const r = await fetch('{% url "merge_persons" %}', { method: 'POST', body: fd });
   const d = await r.json();
   if (d.group_id) {
-    toast(`Gruppe "${d.label}" erstellt`);
+    toast(`Gruppe "${d.label}" aktualisiert`);
     setTimeout(() => location.reload(), 800);
   } else {
     toast(d.error, 'error');

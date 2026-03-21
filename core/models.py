@@ -14,6 +14,11 @@ class VideoSource(models.Model):
     resolution   = models.CharField(max_length=32, blank=True)
     scanned_at   = models.DateTimeField(auto_now_add=True)
     thumbnail    = models.ImageField(upload_to='thumbnails/videos/', null=True, blank=True)
+    detection_status = models.CharField(
+        max_length=16,
+        choices=[('pending','Pending'),('detecting','Detecting'),('done','Done'),('failed','Failed')],
+        default='pending',
+    )
 
     class Meta:
         ordering = ['folder', 'filename']

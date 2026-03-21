@@ -119,7 +119,7 @@ def run_stage2(
     cluster_ids = _cluster_poses(theta_t.cpu().numpy(), cfg.n_pose_clusters)
 
     # ── Load SMPL-X ──────────────────────────────────────────────────────────
-    smplx_model     = _load_smplx(num_betas, device)
+    smplx_model     = _load_smplx(num_betas, device, batch_size=n_frames)
     V               = smplx_model.v_template.shape[0]
     v_template_orig = smplx_model.v_template.data.clone()
 
@@ -260,7 +260,7 @@ def _load_stage1(data_path: str) -> dict:
 
 # ── SMPL-X ────────────────────────────────────────────────────────────────────
 
-def _load_smplx(num_betas: int, device: torch.device):
+def _load_smplx(num_betas: int, device: torch.device, batch_size: int = 1):
     from django.conf import settings
     import smplx
 
@@ -272,6 +272,7 @@ def _load_smplx(num_betas: int, device: torch.device):
         num_betas      = num_betas,
         use_pca        = False,
         flat_hand_mean = True,
+        batch_size     = batch_size,
     ).to(device)
     model.eval()
     return model

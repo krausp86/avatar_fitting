@@ -46,6 +46,8 @@ _SMPLX_TO_MP: Dict[int, int] = {
     8:  28,   # right_ankle    → mp right_ankle
     10: 31,   # left_foot      → mp left_foot_index
     11: 32,   # right_foot     → mp right_foot_index
+    # NOTE: SMPL-X joint 15 is the skull-base, NOT the nose.
+    # Adding nose here caused systematic vertical offset → removed.
     16: 11,   # left_shoulder  → mp left_shoulder
     17: 12,   # right_shoulder → mp right_shoulder
     18: 13,   # left_elbow     → mp left_elbow
@@ -66,20 +68,26 @@ MAX_FIT_FRAMES = 150   # cap frames to keep memory manageable
 @dataclass
 class Stage1Config:
     num_betas:                  int   = 10
-    n_shape_epochs:             int   = 100
-    n_pose_epochs:              int   = 100
+    gender:                     str   = 'neutral'   # 'neutral' | 'male' | 'female'
+    max_frames:                 int   = 150          # cap on training frames
+    n_warmup_epochs:            int   = 50           # orient+transl only
+    n_shape_epochs:             int   = 200          # beta+transl, pose frozen
+    n_poseref_epochs:           int   = 100          # pose_ref+orient+transl, beta frozen
+    n_pose_epochs:              int   = 300          # per-frame pose (Phase 2)
     lr_shape:                   float = 5e-3
     lr_pose:                    float = 5e-3
     w_keypoint:                 float = 1.0
     w_silhouette:               float = 0.5
     w_shape_prior:              float = 0.01
     w_pose_prior:               float = 0.001
+    w_temporal:                 float = 0.1          # adjacent-frame pose smoothness
     static_velocity_threshold:  float = 0.05
 
 
 @dataclass
 class Stage1Result:
     beta:              np.ndarray   # (num_betas,)
+    gender:            str
     theta_t:           np.ndarray   # (N, 63)  body pose axis-angle
     global_orient_t:   np.ndarray   # (N, 3)
     transl_t:          np.ndarray   # (N, 3)
@@ -113,12 +121,14 @@ def run_stage1(
     cfg = Stage1Config(
         static_velocity_threshold = config_dict.get('static_threshold', 0.05),
         num_betas                 = config_dict.get('num_betas', 10),
+        gender                    = config_dict.get('gender', 'neutral'),
+        max_frames                = config_dict.get('max_frames', 150),
     )
     log.info("Stage 1 on device=%s  num_betas=%d", device, cfg.num_betas)
 
-    smplx_model = _load_smplx(cfg, device)
+    smplx_model = _load_smplx(cfg, device, batch_size=1)
 
-    frames, masks, (H, W) = _load_person_frames(avatar)
+    frames, masks, (H, W), temporal_valid = _load_person_frames(avatar, max_frames=cfg.max_frames)
     if not frames:
         raise RuntimeError(
             "No frames found – run person detection first "
@@ -129,61 +139,254 @@ def run_stage1(
 
     cam = _default_intrinsics(W, H)
 
-    _cb(progress_cb, 0, cfg.n_shape_epochs + cfg.n_pose_epochs,
+    _cb(progress_cb, 0,
+        cfg.n_warmup_epochs + cfg.n_shape_epochs + cfg.n_poseref_epochs + cfg.n_pose_epochs,
         0.0, {}, note='Extracting 2D keypoints…')
 
     kp_2d = _extract_keypoints(frames)   # (N, n_joints, 3)  x_norm, y_norm, vis
 
+    # ── Diagnostics: check how many frames had a visible person ──────────────
+    mean_vis = float(kp_2d[:, :, 2].mean())
+    detected_frames = int((kp_2d[:, :, 2].max(axis=1) > 0.3).sum())
+    log.info(
+        "Stage 1 keypoints: %d/%d frames with detection, mean visibility=%.3f",
+        detected_frames, N, mean_vis,
+    )
+    if detected_frames == 0:
+        raise RuntimeError(
+            "MediaPipe detected no person in any frame. "
+            "Check that the PersonGroup contains frames where the person is clearly visible, "
+            "and that MediaPipe is correctly installed. "
+            f"(mean_visibility={mean_vis:.4f}, frames={N})"
+        )
+    if mean_vis < 0.1:
+        log.warning(
+            "Very low mean keypoint visibility (%.3f) – fitting quality will be poor. "
+            "Try re-running person detection on better-lit / less-occluded footage.",
+            mean_vis,
+        )
+
+    # Frames where at least one joint was detected with sufficient confidence
+    frame_detected = kp_2d[:, :, 2].max(axis=1) > 0.3   # (N,) bool numpy
+
     static_idx = _select_static_frames(kp_2d, cfg.static_velocity_threshold)
+    # Only use static frames that actually have a detected person
+    static_idx = [i for i in static_idx if frame_detected[i]]
     if not static_idx:
-        static_idx = list(range(min(10, N)))
-    log.info("Stage 1: %d/%d static frames selected", len(static_idx), N)
+        # Fallback: any detected frame
+        static_idx = [i for i in range(N) if frame_detected[i]][:10]
+    if not static_idx:
+        static_idx = list(range(min(10, N)))   # last resort
+    log.info(
+        "Stage 1: %d/%d static frames selected (%d/%d frames have detections)",
+        len(static_idx), N, int(frame_detected.sum()), N,
+    )
 
-    # ── Phase 1: shape estimation on static frames ────────────────────────────
+    # ── Phase 1: shape + reference-pose estimation on static frames ─────────────
+    # Crucially we also optimise body_pose_ref so the model matches the actual
+    # pose in the video rather than forcing T-pose onto posed-person keypoints.
 
-    beta        = nn.Parameter(torch.zeros(1, cfg.num_betas, device=device))
-    glob_orient = nn.Parameter(torch.zeros(1, 3, device=device))
-    transl_ref  = nn.Parameter(torch.tensor([[0.0, 0.0, 3.0]], device=device))
+    # ── Phase 1 shared setup ──────────────────────────────────────────────────
 
-    opt_shape = torch.optim.Adam([beta, glob_orient, transl_ref], lr=cfg.lr_shape)
-    total_epochs = cfg.n_shape_epochs + cfg.n_pose_epochs
+    # Initialise global orientation to 180° around X-axis so the body is upright
+    # in camera space.  SMPL-X canonical pose has Y+ = up, but the projection
+    # formula uses OpenCV convention (Y+ = down in image).  Without this flip the
+    # body projects upside-down and the optimizer cannot recover.
+    _pi = torch.tensor([[np.pi, 0.0, 0.0]], dtype=torch.float32, device=device)
 
+    beta          = nn.Parameter(torch.zeros(1, cfg.num_betas, device=device))
+    glob_orient   = nn.Parameter(_pi.clone())
+    body_pose_ref = nn.Parameter(torch.zeros(1, 63, device=device))
+
+    # Central reference frame: the static frame with highest mean keypoint visibility.
+    # All Phase 1b/1c optimisation uses this single frame so that beta and pose_ref
+    # are not entangled across frames with differing body positions.
+    center_idx = max(static_idx, key=lambda i: float(kp_2d[i, :, 2].mean()))
+    kp_center_np = kp_2d[center_idx]                      # (n_j, 3)
+    vis_mask     = kp_center_np[:, 2] > 0.4
+    kp_center    = torch.tensor(kp_center_np, dtype=torch.float32, device=device)
+
+    # Phase 1a uses the center frame PLUS its guaranteed temporal neighbours so
+    # that glob_orient and transl_ref are anchored to real motion, not a single
+    # possibly atypical frame.  Using consecutive indices in kp_2d guarantees
+    # adjacency regardless of how many total frames are in the dataset.
+    prev_idx   = max(0, center_idx - 1)
+    next_idx   = min(N - 1, center_idx + 1)
+    triplet_kp = [
+        torch.tensor(kp_2d[i], dtype=torch.float32, device=device)
+        for i in dict.fromkeys([prev_idx, center_idx, next_idx])   # deduplicate at boundaries
+    ]
+    log.info("Stage 1 reference frame: %d  (triplet: %d-%d-%d)",
+             center_idx, prev_idx, center_idx, next_idx)
+
+    # Z initialisation from center-frame keypoint scale
+    _shoulder_l = _SMPLX_IDX.index(16) if 16 in _SMPLX_IDX else None
+    _shoulder_r = _SMPLX_IDX.index(17) if 17 in _SMPLX_IDX else None
+    _ankle_l    = _SMPLX_IDX.index(7)  if 7  in _SMPLX_IDX else None
+    _ankle_r    = _SMPLX_IDX.index(8)  if 8  in _SMPLX_IDX else None
+
+    ankle_vis = (
+        (_ankle_l is not None and vis_mask[_ankle_l]) or
+        (_ankle_r is not None and vis_mask[_ankle_r])
+    )
+    if _shoulder_l is not None and vis_mask[_shoulder_l] and ankle_vis:
+        ankle_idx = _ankle_l if (_ankle_l is not None and vis_mask[_ankle_l]) else _ankle_r
+        dy_px  = abs(kp_center_np[_shoulder_l, 1] - kp_center_np[ankle_idx, 1]) * cam['H']
+        Z_init = float(np.clip(cam['fy'] * 0.85 / max(dy_px, 1.0), 1.0, 8.0))
+        log.info("Stage 1: Z init shoulder-ankle: dy=%.1f px → Z=%.2f m", dy_px, Z_init)
+    elif (_shoulder_l is not None and _shoulder_r is not None
+            and vis_mask[_shoulder_l] and vis_mask[_shoulder_r]):
+        dx_px = abs(kp_center_np[_shoulder_l, 0] - kp_center_np[_shoulder_r, 0]) * cam['W']
+        if dx_px > 10:
+            Z_init = float(np.clip(cam['fx'] * 0.38 / max(dx_px, 1.0), 1.0, 8.0))
+            log.info("Stage 1: Z init shoulder width: dx=%.1f px → Z=%.2f m", dx_px, Z_init)
+        else:
+            Z_init = 3.0
+    else:
+        Z_init = 3.0
+        log.info("Stage 1: Z init fallback Z=%.2f m", Z_init)
+
+    transl_ref = nn.Parameter(torch.tensor([[0.0, 0.0, Z_init]], device=device))
+
+    # Shoulder span scale constraint (computed from center frame, pose-invariant)
+    _sh_l_idx = _SMPLX_IDX.index(16) if 16 in _SMPLX_IDX else None
+    _sh_r_idx = _SMPLX_IDX.index(17) if 17 in _SMPLX_IDX else None
+    _use_scale_loss = (
+        _sh_l_idx is not None and _sh_r_idx is not None
+        and vis_mask[_sh_l_idx] and vis_mask[_sh_r_idx]
+    )
+    _obs_shoulder_dx_px = (
+        abs(kp_center_np[_sh_l_idx, 0] - kp_center_np[_sh_r_idx, 0]) * cam['W']
+        if _use_scale_loss else 1.0
+    )
+
+    def _scale_loss(j2d):
+        if not _use_scale_loss:
+            return torch.zeros(1, device=device)
+        proj_dx = (j2d[_sh_l_idx, 0] - j2d[_sh_r_idx, 0]).abs()
+        return ((proj_dx - _obs_shoulder_dx_px) / max(_obs_shoulder_dx_px, 1.0)) ** 2
+
+    def _forward_center(betas, orient, transl, pose):
+        """Forward pass for the center reference frame."""
+        out     = smplx_model(betas=betas, global_orient=orient,
+                              transl=transl, body_pose=pose)
+        j2d     = _project(out.joints[0, _SMPLX_IDX], cam)
+        loss_kp = _kp_loss(j2d, kp_center, cam)
+        return out, j2d, loss_kp
+
+    total_epochs = (cfg.n_warmup_epochs + cfg.n_shape_epochs +
+                    cfg.n_poseref_epochs + cfg.n_pose_epochs)
+
+    # ── Phase 1a: Warm-up — orient + transl only ──────────────────────────────
+    # Fits the body position/orientation using the center frame PLUS its two
+    # temporal neighbours (guaranteed adjacent in the video stream).  Running
+    # three forward passes with a shared transl anchors the result to real
+    # motion continuity — the single shared position must be plausible for
+    # all three consecutive frames simultaneously.
+    log.info("Stage 1a warm-up: %d epochs (orient + transl, triplet frames)", cfg.n_warmup_epochs)
+    opt_warmup = torch.optim.Adam([glob_orient, transl_ref], lr=cfg.lr_shape)
+    for epoch in range(cfg.n_warmup_epochs):
+        opt_warmup.zero_grad()
+        loss_kp_total = torch.zeros(1, device=device)
+        for kp_t in triplet_kp:
+            out_t = smplx_model(betas=beta.detach(), global_orient=glob_orient,
+                                transl=transl_ref, body_pose=body_pose_ref.detach())
+            j2d_t = _project(out_t.joints[0, _SMPLX_IDX], cam)
+            loss_kp_total = loss_kp_total + _kp_loss(j2d_t, kp_t, cam)
+        loss_kp_total = loss_kp_total / len(triplet_kp)
+        # Scale constraint from center frame only
+        out_c = smplx_model(betas=beta.detach(), global_orient=glob_orient,
+                            transl=transl_ref, body_pose=body_pose_ref.detach())
+        j2d_c = _project(out_c.joints[0, _SMPLX_IDX], cam)
+        loss   = cfg.w_keypoint * loss_kp_total + 0.5 * _scale_loss(j2d_c)
+        loss.backward()
+        opt_warmup.step()
+        if epoch % 10 == 0:
+            _cb(progress_cb, epoch, total_epochs, float(loss),
+                {'keypoint': round(float(loss_kp_total), 4)})
+
+    # ── Phase 1b: Shape — beta + transl, orient + pose FROZEN ────────────────
+    # Uses ONLY the center frame from here on.  With orientation already
+    # correct, beta receives a clean gradient signal without pose interference.
+    log.info("Stage 1b shape: %d epochs (beta + transl, center frame)", cfg.n_shape_epochs)
+    glob_orient_frozen = glob_orient.detach()
+    opt_shape = torch.optim.Adam([beta, transl_ref], lr=cfg.lr_shape)
     for epoch in range(cfg.n_shape_epochs):
         opt_shape.zero_grad()
-
-        out     = smplx_model(betas=beta, global_orient=glob_orient, transl=transl_ref)
-        j2d     = _project(out.joints[0, _SMPLX_IDX], cam)       # (n_joints, 2) px
-        kp_mean = torch.tensor(
-            kp_2d[static_idx].mean(axis=0), dtype=torch.float32, device=device
-        )  # mean keypoints over static frames → stable shape target
-
-        loss_kp = _kp_loss(j2d, kp_mean, cam)
+        out, j2d, loss_kp = _forward_center(
+            beta, glob_orient_frozen, transl_ref, body_pose_ref.detach()
+        )
         loss_sp = (beta ** 2).mean()
-        loss    = cfg.w_keypoint * loss_kp + cfg.w_shape_prior * loss_sp
+        loss    = (cfg.w_keypoint    * loss_kp +
+                   cfg.w_shape_prior * loss_sp +
+                   0.5               * _scale_loss(j2d))
         loss.backward()
         opt_shape.step()
-
         if epoch % 10 == 0:
             preview = None
             if epoch % 50 == 0:
-                preview = _make_preview(frames[static_idx[0]],
+                preview = _make_preview(frames[center_idx],
                                         out.joints[0, _SMPLX_IDX].detach(), cam)
-            _cb(progress_cb, epoch, total_epochs, float(loss), {
+            _cb(progress_cb, cfg.n_warmup_epochs + epoch, total_epochs, float(loss), {
                 'keypoint':    round(float(loss_kp), 4),
                 'shape_prior': round(float(loss_sp), 4),
             }, preview_jpg=preview)
 
     beta_fixed = beta.detach()
 
-    # ── Phase 2: pose estimation per frame (batched) ──────────────────────────
+    # ── Phase 1c: Pose-ref — body_pose_ref + orient + transl, beta FROZEN ────
+    # With shape fixed, find the reference pose that best explains static frames.
+    log.info("Stage 1c pose-ref: %d epochs (pose_ref + orient + transl)", cfg.n_poseref_epochs)
+    glob_orient   = nn.Parameter(glob_orient_frozen.clone())   # unfreeze orient
+    opt_poseref   = torch.optim.Adam(
+        [body_pose_ref, glob_orient, transl_ref], lr=cfg.lr_shape
+    )
+    for epoch in range(cfg.n_poseref_epochs):
+        opt_poseref.zero_grad()
+        out, j2d, loss_kp = _forward_center(
+            beta_fixed, glob_orient, transl_ref, body_pose_ref
+        )
+        loss_pp = (body_pose_ref ** 2).mean()
+        loss    = (cfg.w_keypoint   * loss_kp +
+                   cfg.w_pose_prior * loss_pp +
+                   0.5              * _scale_loss(j2d))
+        loss.backward()
+        opt_poseref.step()
+        if epoch % 10 == 0:
+            preview = None
+            if epoch % 50 == 0:
+                preview = _make_preview(frames[center_idx],
+                                        out.joints[0, _SMPLX_IDX].detach(), cam)
+            _cb(progress_cb,
+                cfg.n_warmup_epochs + cfg.n_shape_epochs + epoch,
+                total_epochs, float(loss), {
+                    'keypoint':   round(float(loss_kp), 4),
+                    'pose_prior': round(float(loss_pp), 4),
+                }, preview_jpg=preview)
 
-    body_pose  = nn.Parameter(torch.zeros(N, 63, device=device))
-    orient_all = nn.Parameter(torch.zeros(N, 3, device=device))
+    # ── Phase 2: pose estimation per frame (batched) ──────────────────────────
+    # Need a separate model instance with batch_size=N; smplx bakes batch_size
+    # into internal buffers at creation time, so a batch_size=1 model cannot
+    # be used for N>1 forward passes without triggering a torch.cat size error.
+    smplx_model = _load_smplx(cfg, device, batch_size=N)
+
+    # Initialise per-frame pose from Phase 1 reference pose (warm start)
+    body_pose  = nn.Parameter(body_pose_ref.detach().expand(N, -1).clone())
+    orient_all = nn.Parameter(glob_orient.detach().expand(N, -1).clone())
     transl_all = nn.Parameter(transl_ref.detach().expand(N, -1).clone())
 
     opt_pose = torch.optim.Adam([body_pose, orient_all, transl_all], lr=cfg.lr_pose)
 
-    kp_tensor = torch.tensor(kp_2d, dtype=torch.float32, device=device)  # (N, n_j, 3)
+    kp_tensor       = torch.tensor(kp_2d, dtype=torch.float32, device=device)   # (N, n_j, 3)
+    # Which consecutive frame-pairs are within the same continuous clip.
+    # Cross-clip boundaries must NOT get a temporal smoothness penalty.
+    temp_valid_mask = torch.tensor(temporal_valid, dtype=torch.bool, device=device)  # (N-1,)
+    # Boolean mask: only frames where MediaPipe detected at least one joint.
+    # Frames without a person must not contribute to the keypoint loss —
+    # their zero-visibility entries would dilute gradients from good frames.
+    det_mask   = torch.tensor(frame_detected, dtype=torch.bool, device=device)  # (N,)
+    log.info("Phase 2: %d/%d frames have detections and will contribute to loss",
+             int(det_mask.sum()), N)
     sil_ok    = _pytorch3d_available()
 
     loss_kp = loss_sil = loss_pp = torch.tensor(0.0)   # init for final quality
@@ -202,15 +405,26 @@ def run_stage1(
 
         j2d_batch = _project_batch(out.joints[:, _SMPLX_IDX, :], cam)  # (N, n_j, 2)
 
-        loss_kp  = _kp_loss_batch(j2d_batch, kp_tensor, cam)
+        loss_kp  = _kp_loss_batch(j2d_batch, kp_tensor, cam, frame_mask=det_mask)
         loss_pp  = (body_pose ** 2).mean()
         loss_sil = _silhouette_loss_batch(out.vertices, smplx_model.faces_tensor,
                                           masks, cam, device) if sil_ok else \
                    torch.zeros(1, device=device)
 
+        # Temporal smoothness: penalise large pose jumps between adjacent frames,
+        # but ONLY within the same continuous clip (not across track boundaries).
+        if N > 1 and temp_valid_mask.any():
+            pose_delta   = body_pose[1:] - body_pose[:-1]      # (N-1, 63)
+            orient_delta = orient_all[1:] - orient_all[:-1]    # (N-1, 3)
+            loss_temp    = (pose_delta[temp_valid_mask].pow(2).mean() +
+                            orient_delta[temp_valid_mask].pow(2).mean())
+        else:
+            loss_temp = torch.zeros(1, device=device)
+
         loss = (cfg.w_keypoint   * loss_kp +
                 cfg.w_silhouette * loss_sil +
-                cfg.w_pose_prior * loss_pp)
+                cfg.w_pose_prior * loss_pp +
+                cfg.w_temporal   * loss_temp)
         loss.backward()
         opt_pose.step()
 
@@ -219,10 +433,13 @@ def run_stage1(
             if epoch % 50 == 0:
                 preview = _make_preview(frames[0],
                                         out.joints[0, _SMPLX_IDX].detach(), cam)
-            _cb(progress_cb, cfg.n_shape_epochs + epoch, total_epochs, float(loss), {
+            _cb(progress_cb,
+                cfg.n_warmup_epochs + cfg.n_shape_epochs + cfg.n_poseref_epochs + epoch,
+                total_epochs, float(loss), {
                 'keypoint':   round(float(loss_kp), 4),
                 'silhouette': round(float(loss_sil), 4),
                 'pose_prior': round(float(loss_pp), 4),
+                'temporal':   round(float(loss_temp), 4),
             }, preview_jpg=preview)
 
     # ── Final forward pass: collect T_bones_t ────────────────────────────────
@@ -243,6 +460,7 @@ def run_stage1(
 
     return Stage1Result(
         beta             = beta_fixed.squeeze(0).cpu().numpy(),
+        gender           = cfg.gender,
         theta_t          = body_pose.detach().cpu().numpy(),
         global_orient_t  = orient_all.detach().cpu().numpy(),
         transl_t         = transl_all.detach().cpu().numpy(),
@@ -275,28 +493,169 @@ def save_stage1_result(result: Stage1Result, data_path: str) -> None:
             meta = json.load(f)
 
     meta['beta']               = result.beta.tolist()
+    meta['gender']             = result.gender
     meta['camera_intrinsics']  = result.camera_intrinsics
     meta.setdefault('fitting_quality', {}).update(result.fitting_quality)
 
     with open(meta_path, 'w') as f:
         json.dump(meta, f, indent=2)
 
+    # Pre-generate T-pose mesh so the web container can serve it without smplx
+    _save_mesh_obj(result.beta, result.gender, data_path)
+
     log.info("Stage 1 results saved → %s", data_path)
+
+
+def _save_mesh_obj(beta: np.ndarray, gender: str, data_path: str) -> None:
+    """Generate T-pose SMPL-X mesh and save as mesh.obj."""
+    try:
+        import torch
+        import smplx as smplx_lib
+        from django.conf import settings
+
+        model_dir = getattr(settings, 'SMPLX_MODEL_DIR', 'models')
+        model = smplx_lib.create(
+            model_path     = model_dir,
+            model_type     = 'smplx',
+            gender         = gender,
+            num_betas      = len(beta),
+            use_pca        = False,
+            flat_hand_mean = True,
+            batch_size     = 1,
+        )
+        model.eval()
+
+        with torch.no_grad():
+            out = model(betas=torch.tensor([beta.tolist()], dtype=torch.float32))
+
+        verts = out.vertices[0].numpy()   # (V, 3)
+        faces = model.faces               # (F, 3)
+
+        obj_path = os.path.join(data_path, 'mesh.obj')
+        with open(obj_path, 'w') as f:
+            for v in verts:
+                f.write(f'v {v[0]:.5f} {v[1]:.5f} {v[2]:.5f}\n')
+            for face in faces:
+                f.write(f'f {face[0]+1} {face[1]+1} {face[2]+1}\n')
+
+        log.info("mesh.obj saved → %s", obj_path)
+    except Exception:
+        log.exception("Failed to save mesh.obj — smplx may not be available")
+
+
+def generate_stage1_previews(result: Stage1Result, avatar, data_path: str,
+                              n_previews: int = 9) -> None:
+    """
+    Render the fitted SMPL-X mesh overlaid on n_previews evenly-spaced video
+    frames and save them as previews/preview_00.jpg … preview_08.jpg.
+    """
+    try:
+        import torch
+        import smplx as smplx_lib
+        from django.conf import settings
+
+        frames, _, _, _ = _load_person_frames(avatar)
+        if not frames:
+            log.warning("generate_stage1_previews: no frames found")
+            return
+
+        N = len(frames)
+        n = min(n_previews, N)
+        indices = [int(i * (N - 1) / max(n - 1, 1)) for i in range(n)]
+
+        model_dir = getattr(settings, 'SMPLX_MODEL_DIR', 'models')
+        model = smplx_lib.create(
+            model_path     = model_dir,
+            model_type     = 'smplx',
+            gender         = result.gender,
+            num_betas      = len(result.beta),
+            use_pca        = False,
+            flat_hand_mean = True,
+            batch_size     = 1,
+        )
+        model.eval()
+        faces = model.faces  # (F, 3) numpy int32/int64
+
+        cam      = result.camera_intrinsics
+        beta_t   = torch.tensor([result.beta.tolist()], dtype=torch.float32)
+
+        preview_dir = os.path.join(data_path, 'previews')
+        os.makedirs(preview_dir, exist_ok=True)
+
+        for out_i, fi in enumerate(indices):
+            frame = frames[fi].copy()
+            H_f, W_f = frame.shape[:2]
+
+            with torch.no_grad():
+                out = model(
+                    betas         = beta_t,
+                    body_pose     = torch.tensor([result.theta_t[fi].tolist()],
+                                                 dtype=torch.float32),
+                    global_orient = torch.tensor([result.global_orient_t[fi].tolist()],
+                                                 dtype=torch.float32),
+                    transl        = torch.tensor([result.transl_t[fi].tolist()],
+                                                 dtype=torch.float32),
+                )
+
+            verts = out.vertices[0].numpy()   # (V, 3)
+            Z     = np.maximum(verts[:, 2], 0.1)
+            px    = (verts[:, 0] / Z * cam['fx'] + cam['cx']).astype(np.int32)
+            py    = (verts[:, 1] / Z * cam['fy'] + cam['cy']).astype(np.int32)
+
+            # Vectorised backface culling
+            v0, v1, v2 = faces[:, 0], faces[:, 1], faces[:, 2]
+            ex = (px[v1] - px[v0]).astype(np.int64)
+            ey = (py[v1] - py[v0]).astype(np.int64)
+            fx_ = (px[v2] - px[v0]).astype(np.int64)
+            fy_ = (py[v2] - py[v0]).astype(np.int64)
+            front = (ex * fy_ - ey * fx_) > 0
+            z_ok  = (verts[v0, 2] > 0.1) & (verts[v1, 2] > 0.1) & (verts[v2, 2] > 0.1)
+            vis_faces = faces[front & z_ok]
+
+            # Draw semi-transparent mesh overlay
+            overlay = frame.copy()
+            mesh_color = (90, 140, 210)   # BGR warm blue
+            for face in vis_faces:
+                pts = np.array([[px[face[0]], py[face[0]]],
+                                [px[face[1]], py[face[1]]],
+                                [px[face[2]], py[face[2]]]], dtype=np.int32)
+                cv2.fillPoly(overlay, [pts], mesh_color)
+
+            frame = cv2.addWeighted(frame, 0.45, overlay, 0.55, 0)
+
+            # Draw fitted 2D keypoints on top
+            kp = _extract_keypoints([frames[fi]])[0]   # (n_j, 3)
+            for j in range(len(_MP_IDX)):
+                if kp[j, 2] > 0.4:
+                    cx_ = int(kp[j, 0] * W_f)
+                    cy_ = int(kp[j, 1] * H_f)
+                    cv2.circle(frame, (cx_, cy_), 4, (0, 255, 128), -1)
+
+            out_path = os.path.join(preview_dir, f'preview_{out_i:02d}.jpg')
+            cv2.imwrite(out_path, frame, [cv2.IMWRITE_JPEG_QUALITY, 88])
+            log.info("Preview %d/%d → %s", out_i + 1, n, out_path)
+
+    except Exception:
+        log.exception("generate_stage1_previews failed")
 
 
 # ── Data loading ───────────────────────────────────────────────────────────────
 
 def _load_person_frames(
     avatar,
-) -> Tuple[List[np.ndarray], List[Optional[np.ndarray]], Tuple[int, int]]:
+    max_frames: int = MAX_FIT_FRAMES,
+) -> Tuple[List[np.ndarray], List[Optional[np.ndarray]], Tuple[int, int], np.ndarray]:
     """
     Load BGR frames and binary segmentation masks for all DetectedPerson tracks
     assigned to the avatar's PersonGroup.
 
     Returns:
-        frames  – list of BGR images (≤ MAX_FIT_FRAMES)
-        masks   – list of binary masks, same length (None where unavailable)
-        (H, W)  – video frame dimensions
+        frames         – list of BGR images (≤ max_frames)
+        masks          – list of binary masks, same length (None where unavailable)
+        (H, W)         – video frame dimensions
+        temporal_valid – bool array (len(frames)-1,): True if frames[i] and
+                         frames[i+1] are from the same continuous clip and the
+                         temporal smoothness loss should be applied between them.
     """
     from core.models import DetectedPerson
 
@@ -309,33 +668,38 @@ def _load_person_frames(
 
     H, W = _video_hw(persons[0].video.path)
 
-    # Build flat list of (video_path, frame_idx, mask_or_None)
-    candidates: List[Tuple[str, int, Optional[np.ndarray]]] = []
-    for dp in persons:
+    # Build flat list of (video_path, frame_idx, mask_or_None, track_id)
+    candidates: List[Tuple[str, int, Optional[np.ndarray], int]] = []
+    for track_id, dp in enumerate(persons):
         mask_lookup = _load_mask_lookup(dp.meta.get('mask_path'))
         for fi in range(dp.frame_start, dp.frame_end + 1, 3):
-            candidates.append((dp.video.path, fi, mask_lookup.get(fi)))
+            candidates.append((dp.video.path, fi, mask_lookup.get(fi), track_id))
 
-    # Evenly sample down to MAX_FIT_FRAMES
-    if len(candidates) > MAX_FIT_FRAMES:
-        step       = len(candidates) // MAX_FIT_FRAMES
-        candidates = candidates[::step][:MAX_FIT_FRAMES]
+    # Evenly sample down to max_frames (preserves temporal order within each track)
+    if len(candidates) > max_frames:
+        step       = len(candidates) // max_frames
+        candidates = candidates[::step][:max_frames]
 
-    frames, masks = [], []
+    frames, masks, track_ids = [], [], []
     open_caps: Dict[str, cv2.VideoCapture] = {}
 
-    for video_path, frame_idx, mask in candidates:
+    for video_path, frame_idx, mask, track_id in candidates:
         cap = open_caps.setdefault(video_path, cv2.VideoCapture(video_path))
         cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
         ret, frame = cap.read()
         if ret:
             frames.append(frame)
             masks.append(mask)
+            track_ids.append(track_id)
 
     for cap in open_caps.values():
         cap.release()
 
-    return frames, masks, (H, W)
+    # temporal_valid[i] = True  ↔  frame i and frame i+1 belong to the same track
+    tids = np.array(track_ids, dtype=np.int32)
+    temporal_valid = tids[:-1] == tids[1:] if len(tids) > 1 else np.array([], dtype=bool)
+
+    return frames, masks, (H, W), temporal_valid
 
 
 def _load_mask_lookup(mask_path: Optional[str]) -> Dict[int, np.ndarray]:
@@ -356,7 +720,7 @@ def _video_hw(video_path: str) -> Tuple[int, int]:
 
 # ── SMPL-X ────────────────────────────────────────────────────────────────────
 
-def _load_smplx(cfg: Stage1Config, device: torch.device):
+def _load_smplx(cfg: Stage1Config, device: torch.device, batch_size: int = 1):
     from django.conf import settings
     import smplx
 
@@ -364,10 +728,11 @@ def _load_smplx(cfg: Stage1Config, device: torch.device):
     model = smplx.create(
         model_path    = model_dir,
         model_type    = 'smplx',
-        gender        = 'neutral',
+        gender        = cfg.gender,
         num_betas     = cfg.num_betas,
         use_pca       = False,       # full body pose parameters
         flat_hand_mean= True,
+        batch_size    = batch_size,
     ).to(device)
     model.eval()
     return model
@@ -377,7 +742,7 @@ def _load_smplx(cfg: Stage1Config, device: torch.device):
 
 def _extract_keypoints(frames: List[np.ndarray]) -> np.ndarray:
     """
-    Run MediaPipe Pose on each frame.
+    Run MediaPipe PoseLandmarker (Tasks API, mediapipe >= 0.10) on each frame.
 
     Returns (N, n_joints, 3) with (x_norm, y_norm, visibility) for each
     joint in _MP_IDX order (same order as _SMPLX_IDX).
@@ -390,20 +755,34 @@ def _extract_keypoints(frames: List[np.ndarray]) -> np.ndarray:
         log.warning("mediapipe not available – using zero keypoints")
         return np.zeros((len(frames), n_joints, 3), dtype=np.float32)
 
-    mp_pose = mp.solutions.pose
-    kp_all  = []
+    # Same model file used by person_detector.py
+    MODEL_PATH = "/tmp/pose_landmarker_lite.task"
+    if not os.path.exists(MODEL_PATH):
+        import urllib.request
+        MODEL_URL = (
+            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+            "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+        )
+        log.info("Downloading MediaPipe pose model to %s …", MODEL_PATH)
+        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
 
-    with mp_pose.Pose(
-        static_image_mode      = True,
-        model_complexity       = 1,
-        min_detection_confidence = 0.5,
-    ) as pose:
+    options = mp.tasks.vision.PoseLandmarkerOptions(
+        base_options=mp.tasks.BaseOptions(
+            model_asset_path=MODEL_PATH,
+            delegate=mp.tasks.BaseOptions.Delegate.CPU,
+        ),
+        running_mode=mp.tasks.vision.RunningMode.IMAGE,
+    )
+
+    kp_all = []
+    with mp.tasks.vision.PoseLandmarker.create_from_options(options) as lm_model:
         for frame in frames:
-            rgb     = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            results = pose.process(rgb)
-            row     = np.zeros((n_joints, 3), dtype=np.float32)
+            rgb      = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+            results  = lm_model.detect(mp_image)
+            row      = np.zeros((n_joints, 3), dtype=np.float32)
             if results.pose_landmarks:
-                lm = results.pose_landmarks.landmark
+                lm = results.pose_landmarks[0]   # first detected person
                 for i, mp_idx in enumerate(_MP_IDX):
                     p = lm[mp_idx]
                     row[i] = [p.x, p.y, p.visibility]
@@ -474,19 +853,27 @@ def _kp_loss(j2d: torch.Tensor, kp: torch.Tensor, cam: dict) -> torch.Tensor:
     return (diff.sum(dim=-1) * vis.squeeze(-1)).mean()
 
 
-def _kp_loss_batch(j2d: torch.Tensor, kp: torch.Tensor, cam: dict) -> torch.Tensor:
+def _kp_loss_batch(j2d: torch.Tensor, kp: torch.Tensor, cam: dict,
+                   frame_mask: torch.Tensor = None) -> torch.Tensor:
     """
     Batched visibility-weighted keypoint loss.
 
-    j2d: (N, n_joints, 2) pixels
-    kp:  (N, n_joints, 3) mediapipe (x_norm, y_norm, vis)
+    j2d:        (N, n_joints, 2) pixels
+    kp:         (N, n_joints, 3) mediapipe (x_norm, y_norm, vis)
+    frame_mask: (N,) bool – only detected frames contribute to the mean.
+                Frames without a detected person are excluded entirely so
+                they don't dilute the gradient of well-detected frames.
     """
     vis       = kp[..., 2:3].clamp(0.0, 1.0)
     target_px = kp[..., :2] * torch.tensor(
         [[cam['W'], cam['H']]], dtype=j2d.dtype, device=j2d.device
     )
     diff = (j2d - target_px) ** 2
-    return (diff.sum(dim=-1) * vis.squeeze(-1)).mean()
+    per_frame = (diff.sum(dim=-1) * vis.squeeze(-1)).mean(dim=-1)  # (N,)
+
+    if frame_mask is not None and frame_mask.any():
+        return per_frame[frame_mask].mean()
+    return per_frame.mean()
 
 
 # ── Silhouette loss (PyTorch3D) ────────────────────────────────────────────────

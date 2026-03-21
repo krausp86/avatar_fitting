@@ -78,6 +78,62 @@
     </div>
     {% endif %}
 
+    <!-- Fitting diagnostics -->
+    {% if n_previews %}
+    <div class="card">
+      <div class="card-header">Fitting-Vorschau ({{ n_previews }} Frames)</div>
+      <div style="display:grid;grid-template-columns:repeat(3,1fr);gap:3px;padding:3px">
+        {% for i in "012345678"|make_list %}
+        {% if forloop.counter0 < n_previews %}
+        <img src="{% url 'avatar_preview_image' avatar.pk forloop.counter0 %}"
+             style="width:100%;aspect-ratio:16/9;object-fit:cover;border-radius:2px"
+             loading="lazy">
+        {% endif %}
+        {% endfor %}
+      </div>
+    </div>
+    {% endif %}
+
+    {% if fitting_meta %}
+    <div class="card">
+      <div class="card-header">Fitting-Ergebnis</div>
+      <div class="card-body" style="padding:0">
+        <table>
+          <tbody>
+          {% with q=fitting_meta.fitting_quality %}
+          {% if q %}
+          <tr><td class="text-muted text-sm">Frames</td><td class="text-mono text-sm">{{ q.n_frames|default:"—" }}</td></tr>
+          <tr><td class="text-muted text-sm">Davon statisch</td><td class="text-mono text-sm">{{ q.n_static_frames|default:"—" }}</td></tr>
+          <tr><td class="text-muted text-sm">Keypoint-Fehler</td>
+              <td class="text-mono text-sm {% if q.stage1_keypoint_err == 0 %}text-accent{% endif %}">
+                {{ q.stage1_keypoint_err|default:"—" }}
+                {% if q.stage1_keypoint_err == 0 %} ⚠ kein Signal{% endif %}
+              </td></tr>
+          {% endif %}
+          {% endwith %}
+          {% if fitting_meta.beta %}
+          <tr>
+            <td class="text-muted text-sm">β (Shape)</td>
+            <td class="text-mono text-sm" style="word-break:break-all">
+              {% for b in fitting_meta.beta %}{{ b|floatformat:3 }}{% if not forloop.last %}, {% endif %}{% endfor %}
+            </td>
+          </tr>
+          {% endif %}
+          {% if fitting_meta.camera_intrinsics %}
+          <tr><td class="text-muted text-sm">Kamera f</td>
+              <td class="text-mono text-sm">{{ fitting_meta.camera_intrinsics.fx|floatformat:0 }}px / {{ fitting_meta.camera_intrinsics.W|floatformat:0 }}×{{ fitting_meta.camera_intrinsics.H|floatformat:0 }}</td></tr>
+          {% endif %}
+          </tbody>
+        </table>
+        <div style="padding:10px 14px;display:flex;align-items:center;gap:12px">
+          <a href="{% url 'avatar_mesh' avatar.pk %}" class="text-sm text-muted text-mono" target="_blank" id="meshObjLink">mesh.obj ↗</a>
+          <button class="btn btn-ghost btn-sm" onclick="rebuildMesh()" id="rebuildBtn">⟳ Mesh generieren</button>
+          <span id="rebuildStatus" class="text-sm text-mono" style="display:none"></span>
+        </div>
+      </div>
+    </div>
+    {% endif %}
+
     <!-- Edits -->
     {% if edits %}
     <div class="card">
@@ -119,7 +175,13 @@
             </div>
             <div class="version-meta">{{ v.created_at|date:"d.m.Y H:i" }}{% if v.notes %} · {{ v.notes }}{% endif %}</div>
           </div>
-          <span class="badge badge-{{ v.status }}">{{ v.get_status_display }}</span>
+          <div class="flex-center gap-8">
+            <span class="badge badge-{{ v.status }}">{{ v.get_status_display }}</span>
+            <form method="post" action="{% url 'avatar_delete' v.pk %}" style="display:inline" onsubmit="return confirm('v{{ v.version }} löschen?')">
+              {% csrf_token %}
+              <button class="btn btn-ghost btn-sm" style="padding:2px 7px;color:var(--muted)">✕</button>
+            </form>
+          </div>
         </div>
         {% endfor %}
       </div>
@@ -137,8 +199,6 @@
       <div class="form-group">
         <label>Stages</label>
         <div class="check-grid">
-          {% for s,name in "1:SMPL-X Fit,1.5:Face,2:Statisch,2.5:Textur,3:Cage,4:Physik,5:PriorMLP"|split:"," %}
-          {% endfor %}
           <label class="check-card"><input type="checkbox" name="stages" value="1" checked> Stage 1 – SMPL-X</label>
           <label class="check-card"><input type="checkbox" name="stages" value="1.5" checked> Stage 1.5 – Gesicht</label>
           <label class="check-card"><input type="checkbox" name="stages" value="2" checked> Stage 2 – Offsets</label>
@@ -149,7 +209,20 @@
         </div>
       </div>
 
+      <div class="form-group">
+        <label>Geschlecht (SMPL-X Modell)</label>
+        <select name="gender">
+          <option value="neutral">Neutral</option>
+          <option value="female" {% if fitting_meta.gender == 'female' %}selected{% endif %}>Weiblich</option>
+          <option value="male"   {% if fitting_meta.gender == 'male'   %}selected{% endif %}>Männlich</option>
+        </select>
+      </div>
+
       <div class="grid-2" style="gap:12px">
+        <div class="form-group">
+          <label>Trainingsframes (max)</label>
+          <input type="number" name="max_frames" value="150" min="10" max="600" step="10">
+        </div>
         <div class="form-group">
           <label>Statisch-Schwelle</label>
           <input type="number" name="static_threshold" value="0.05" step="0.01" min="0.01" max="0.5">
@@ -238,7 +311,7 @@ async function startFitting() {
   const fd = new FormData();
   fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
   document.querySelectorAll('input[name=stages]:checked').forEach(el => fd.append('stages', el.value));
-  ['static_threshold','n_cage','tex_res_body','tex_res_face','inpainting'].forEach(n => {
+  ['gender','max_frames','static_threshold','n_cage','tex_res_body','tex_res_face','inpainting'].forEach(n => {
     const el = document.querySelector(`[name=${n}]`);
     if (el) fd.append(n, el.value);
   });
@@ -334,8 +407,40 @@ async function doRename() {
 }
 
 function exportAvatar() {
-  // Trigger ZIP download of avatar data folder
   window.location = `/api/avatar/${AVATAR_ID}/export/`;
+}
+
+async function rebuildMesh() {
+  const btn = document.getElementById('rebuildBtn');
+  const status = document.getElementById('rebuildStatus');
+  btn.disabled = true;
+  btn.textContent = '⏳ Generiere…';
+  status.style.display = '';
+  status.style.color = '#aaa';
+  status.textContent = '';
+
+  try {
+    const fd = new FormData();
+    fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+    const r = await fetch(`/avatars/${AVATAR_ID}/mesh/rebuild/`, { method: 'POST', body: fd });
+    const d = await r.json();
+    if (d.ok) {
+      status.style.color = '#6dbf6d';
+      status.textContent = '✓ mesh.obj erstellt';
+      btn.textContent = '⟳ Mesh generieren';
+      btn.disabled = false;
+    } else {
+      status.style.color = '#e74c3c';
+      status.textContent = '✗ ' + (d.error || 'Fehler');
+      btn.textContent = '⟳ Mesh generieren';
+      btn.disabled = false;
+    }
+  } catch (e) {
+    status.style.color = '#e74c3c';
+    status.textContent = '✗ ' + e.message;
+    btn.textContent = '⟳ Mesh generieren';
+    btn.disabled = false;
+  }
 }
 </script>
 {% endblock %}

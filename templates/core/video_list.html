@@ -53,7 +53,13 @@
             {% if cnt %}<span class="badge badge-done">{{ cnt }}</span>{% else %}<span class="text-muted">—</span>{% endif %}
             {% endwith %}
           </td>
-          <td><a href="{% url 'video_detail' v.pk %}" class="btn btn-ghost btn-sm">Details →</a></td>
+          <td class="flex gap-8">
+            <a href="{% url 'video_detail' v.pk %}" class="btn btn-ghost btn-sm">Details →</a>
+            <form method="post" action="{% url 'video_delete' v.pk %}" onsubmit="return confirm('Video aus DB entfernen?')">
+              {% csrf_token %}
+              <button type="submit" class="btn btn-danger btn-sm">✕</button>
+            </form>
+          </td>
         </tr>
         {% empty %}
         <tr><td colspan="7" style="text-align:center;padding:40px;color:var(--muted)">Keine Videos gefunden. Ordner scannen.</td></tr>
@@ -69,9 +75,9 @@
     <div class="card-header">Ordner scannen</div>
     <div class="card-body">
       <div class="form-group">
-        <label>Pfad</label>
-        <input type="text" id="scanPath" value="{{ scan_root }}">
-        <div class="form-hint">Alle Unterordner werden rekursiv gescannt</div>
+        <label>Gescannter Pfad</label>
+        <div class="text-mono text-sm" style="padding:9px 12px;background:var(--bg);border:1px solid var(--border2);border-radius:var(--r);color:var(--accent)">{{ scan_root }}</div>
+        <div class="form-hint">Ordner wird über VIDEO_FOLDER in .env konfiguriert</div>
       </div>
       <div class="flex gap-8 mt-16">
         <button class="btn btn-primary" onclick="doScan()">Scannen</button>
@@ -94,7 +100,7 @@ function filterFolder(folder, btn) {
 }
 
 async function doScan() {
-  const path = document.getElementById('scanPath').value;
+  const path = '{{ scan_root }}';
   const res  = document.getElementById('scanResult');
   res.textContent = 'Scanning…';
   const r = await post('{% url "scan_videos" %}', {folder: path});

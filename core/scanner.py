@@ -37,7 +37,6 @@ def scan_video_folder(root: str) -> int:
                 folder   = folder or '.',
             )
             _populate_metadata(vs)
-            detect_persons_for_video(vs)
             added += 1
 
     return added

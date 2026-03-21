@@ -10,6 +10,7 @@ urlpatterns = [
     path('videos/scan/', views.scan_videos, name='scan_videos'),
     path('videos/<uuid:pk>/', views.video_detail, name='video_detail'),
     path('videos/<uuid:pk>/detect/', views.detect_persons, name='detect_persons'),
+    path('videos/<uuid:pk>/detect/status/', views.detect_persons_status, name='detect_persons_status'),
 
     # Person groups
     path('persons/', views.person_list, name='person_list'),
@@ -28,10 +29,17 @@ urlpatterns = [
     path('avatars/<uuid:pk>/fit/', views.avatar_fit, name='avatar_fit'),
     path('avatars/<uuid:pk>/edit/', views.avatar_edit, name='avatar_edit'),
     path('avatars/<uuid:pk>/edit/save/', views.avatar_edit_save, name='avatar_edit_save'),
+    path('avatars/<uuid:pk>/mesh.obj', views.avatar_mesh, name='avatar_mesh'),
+    path('avatars/<uuid:pk>/mesh/rebuild/', views.avatar_mesh_rebuild, name='avatar_mesh_rebuild'),
+    path('avatars/<uuid:pk>/mesh/morph/', views.avatar_mesh_morph, name='avatar_mesh_morph'),
 
     # API
+    path('videos/<uuid:pk>/stream/', views.video_stream, name='video_stream'),
+    path('videos/<uuid:pk>/delete/', views.video_delete, name='video_delete'),
     path('api/job/<uuid:pk>/status/', views.job_status, name='job_status'),
     path('api/avatar/<uuid:pk>/export/', views.avatar_export, name='avatar_export'),
     path('api/avatar/<uuid:pk>/versions/', views.avatar_versions, name='avatar_versions'),
+    path('avatars/<uuid:pk>/previews/<int:n>/', views.avatar_preview_image, name='avatar_preview_image'),
     path('persons/group/<uuid:pk>/rename/', views.group_rename, name='group_rename'),
+    path('persons/group/<uuid:pk>/merge/', views.group_merge, name='group_merge'),
 ]

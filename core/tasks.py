@@ -145,9 +145,10 @@ def _run_fitting(job_id, config: dict):
 # ── Stage implementations ──────────────────────────────────────────────────────
 
 def _run_stage1(avatar, config: dict, progress_cb) -> None:
-    from .fitting.stage1 import run_stage1, save_stage1_result
+    from .fitting.stage1 import run_stage1, save_stage1_result, generate_stage1_previews
     result = run_stage1(avatar, config, progress_cb=progress_cb)
     save_stage1_result(result, avatar.data_path)
+    generate_stage1_previews(result, avatar, avatar.data_path)
     log.info("Stage 1 complete for avatar %s", avatar.id)
 
 
