@@ -37,6 +37,21 @@
   color: #555; font-size: 13px;
 }
 
+/* Landmark canvas overlay */
+.lm-img-wrap { position: relative; line-height: 0; }
+.lm-img-wrap canvas {
+  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
+  cursor: crosshair;
+}
+.lm-tooltip {
+  position: fixed; z-index: 999; pointer-events: none;
+  background: #111; border: 1px solid #444; border-radius: 4px;
+  padding: 6px 10px; font-size: 12px; font-family: monospace;
+  white-space: nowrap; display: none;
+}
+.lm-tooltip .tt-name { font-weight: 700; color: #e0e0e0; }
+.lm-tooltip .tt-vis  { margin-top: 2px; }
+
 /* Landmark table */
 .lm-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace; }
 .lm-table th { padding: 6px 10px; text-align: left; font-size: 10px; text-transform: uppercase;
@@ -214,7 +229,10 @@
           <span id="dbgLmStatus" class="text-muted text-sm"></span>
         </div>
         <div class="no-img" id="dbgLmPlaceholder">—</div>
-        <img id="dbgLmImg" style="display:none" alt="Landmarks">
+        <div class="lm-img-wrap" id="dbgLmWrap" style="display:none">
+          <img id="dbgLmImg" style="display:block;width:100%" alt="Landmarks">
+          <canvas id="dbgLmCanvas"></canvas>
+        </div>
       </div>
     </div>
 
@@ -362,22 +380,29 @@ async function debugLoadFrame(frameIdx) {
   document.getElementById('dbgResLabel').textContent = `${d.width}×${d.height}`;
 
   // Images
-  function showImg(imgId, placeholderId, src) {
+  function showImg(imgId, placeholderId, src, wrapperId) {
     const img = document.getElementById(imgId);
     const ph  = document.getElementById(placeholderId);
+    const wrap = wrapperId ? document.getElementById(wrapperId) : null;
     if (src) {
       img.src = src;
       img.style.display = '';
+      if (wrap) wrap.style.display = '';
       ph.style.display  = 'none';
     } else {
       img.style.display = 'none';
+      if (wrap) wrap.style.display = 'none';
       ph.style.display  = '';
       ph.textContent    = '—';
     }
   }
   showImg('dbgOrigImg', 'dbgOrigPlaceholder', d.original);
   showImg('dbgSegImg',  'dbgSegPlaceholder',  d.segmentation);
-  showImg('dbgLmImg',   'dbgLmPlaceholder',   d.landmarks);
+  showImg('dbgLmImg',   'dbgLmPlaceholder',   d.landmarks, 'dbgLmWrap');
+
+  if (d.detection && d.landmark_data.length) {
+    setupLmCanvas(d.landmark_data, d.width, d.height);
+  }
 
   document.getElementById('dbgSegStatus').textContent  = d.segmentation ? '✓' : '—';
   document.getElementById('dbgLmStatus').textContent   = d.detection ? '✓ Person erkannt' : '✗ Keine Person';
@@ -425,6 +450,55 @@ function debugStep(delta) {
   if (dbgCurrentFrame === null) { debugLoadFrame(); return; }
   const next = Math.max(0, Math.min(dbgTotalFrames - 1, dbgCurrentFrame + delta));
   debugLoadFrame(next);
+}
+
+// ── Landmark canvas hover ─────────────────────────────────────────────────
+let dbgLandmarks = [];
+
+function setupLmCanvas(landmarks, imgW, imgH) {
+  dbgLandmarks = landmarks;
+  const canvas  = document.getElementById('dbgLmCanvas');
+  const tooltip = document.getElementById('lmTooltip');
+
+  canvas.width  = imgW;
+  canvas.height = imgH;
+
+  canvas.onmousemove = (e) => {
+    const rect  = canvas.getBoundingClientRect();
+    // Map CSS pixels → image pixels
+    const scaleX = imgW / rect.width;
+    const scaleY = imgH / rect.height;
+    const mx = (e.clientX - rect.left) * scaleX;
+    const my = (e.clientY - rect.top)  * scaleY;
+
+    let nearest = null, bestDist = Infinity;
+    for (const lm of landmarks) {
+      const px = lm.x * imgW;
+      const py = lm.y * imgH;
+      const d  = Math.hypot(mx - px, my - py);
+      if (d < bestDist) { bestDist = d; nearest = lm; }
+    }
+
+    // Only show if within 24px (image coords)
+    if (nearest && bestDist < 24) {
+      const vis = nearest.visibility;
+      const pct = Math.round(vis * 100);
+      const col = vis > 0.7 ? '#c8f060' : vis > 0.4 ? '#f0c860' : '#e74c3c';
+      document.getElementById('ttName').textContent = `#${nearest.idx} · ${nearest.name}`;
+      document.getElementById('ttVis').innerHTML =
+        `<span style="color:${col}">Visibility ${pct}%</span>` +
+        `<span style="color:#555;margin-left:8px">x:${nearest.x.toFixed(3)} y:${nearest.y.toFixed(3)}</span>`;
+      tooltip.style.display = '';
+      tooltip.style.left = (e.clientX + 14) + 'px';
+      tooltip.style.top  = (e.clientY - 10) + 'px';
+    } else {
+      tooltip.style.display = 'none';
+    }
+  };
+
+  canvas.onmouseleave = () => {
+    document.getElementById('lmTooltip').style.display = 'none';
+  };
 }
 </script>
 {% endblock %}

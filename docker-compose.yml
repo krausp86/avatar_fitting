@@ -37,6 +37,8 @@ services:
       - MEDIAPIPE_DISABLE_GPU=1
       - TZ=Europe/Vienna
       - HOME=/tmp
+      - PYOPENGL_PLATFORM=egl
+      - DISPLAY=
     volumes:
       - db_data:/data/db
       # Persistent data – mount your actual training video folder here
