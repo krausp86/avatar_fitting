@@ -40,6 +40,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     curl \
     libgl1 \
+    libgles2 \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
