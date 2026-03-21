@@ -97,6 +97,165 @@ def video_detail(request, pk):
     return render(request, 'core/video_detail.html', {'video': video, 'persons': persons})
 
 
+_POSE_CONNECTIONS = [
+    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),
+    (9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),(17,19),
+    (12,14),(14,16),(16,18),(16,20),(16,22),(18,20),
+    (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
+    (27,29),(28,30),(29,31),(30,32),(27,31),(28,32),
+]
+
+_JOINT_NAMES = [
+    'nose','left_eye_inner','left_eye','left_eye_outer',
+    'right_eye_inner','right_eye','right_eye_outer',
+    'left_ear','right_ear','mouth_left','mouth_right',
+    'left_shoulder','right_shoulder','left_elbow','right_elbow',
+    'left_wrist','right_wrist','left_pinky','right_pinky',
+    'left_index','right_index','left_thumb','right_thumb',
+    'left_hip','right_hip','left_knee','right_knee',
+    'left_ankle','right_ankle','left_heel','right_heel',
+    'left_foot_index','right_foot_index',
+]
+
+
+def video_debug_frame(request, pk):
+    import base64
+    import random as rnd
+    import numpy as np
+    import cv2
+
+    video = get_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    cap = cv2.VideoCapture(video.path)
+    if not cap.isOpened():
+        return JsonResponse({'error': 'Video kann nicht geöffnet werden'}, status=500)
+
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+
+    frame_param = request.GET.get('frame')
+    if frame_param is None:
+        frame_idx = rnd.randint(0, max(0, total_frames - 1))
+    else:
+        frame_idx = max(0, min(int(frame_param), total_frames - 1))
+
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    cap.release()
+
+    if not ret:
+        return JsonResponse({'error': f'Frame {frame_idx} konnte nicht gelesen werden'}, status=500)
+
+    height, width = frame.shape[:2]
+
+    def to_b64(img, quality=88):
+        _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+        return 'data:image/jpeg;base64,' + base64.b64encode(buf).decode()
+
+    result = {
+        'frame_idx': frame_idx,
+        'total_frames': total_frames,
+        'fps': round(fps, 2),
+        'width': width,
+        'height': height,
+        'detection': False,
+        'landmark_data': [],
+        'original': to_b64(frame),
+        'segmentation': None,
+        'landmarks': None,
+        'error': None,
+    }
+
+    try:
+        import mediapipe as mp
+        from .detection.person_detector import _ensure_model, MODEL_PATH
+
+        _ensure_model()
+
+        BaseOptions          = mp.tasks.BaseOptions
+        PoseLandmarker       = mp.tasks.vision.PoseLandmarker
+        PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
+        VisionRunningMode    = mp.tasks.vision.RunningMode
+
+        options = PoseLandmarkerOptions(
+            base_options=BaseOptions(
+                model_asset_path=MODEL_PATH,
+                delegate=BaseOptions.Delegate.CPU,
+            ),
+            running_mode=VisionRunningMode.IMAGE,
+            output_segmentation_masks=True,
+            num_poses=1,
+        )
+
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
+
+        with PoseLandmarker.create_from_options(options) as landmarker:
+            mp_result = landmarker.detect(mp_image)
+
+        # ── Segmentation mask ────────────────────────────────────────────────
+        seg_vis = frame.copy()
+        if mp_result.segmentation_masks:
+            mask = mp_result.segmentation_masks[0].numpy_view()
+            mask_bin = (mask > 0.5).astype(np.uint8)
+            overlay = seg_vis.copy()
+            overlay[mask_bin == 1] = [0, 160, 80]
+            seg_vis = cv2.addWeighted(seg_vis, 0.55, overlay, 0.45, 0)
+            # Contour
+            contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            cv2.drawContours(seg_vis, contours, -1, (0, 255, 100), 2)
+        result['segmentation'] = to_b64(seg_vis)
+
+        # ── Landmarks ────────────────────────────────────────────────────────
+        lm_vis = frame.copy()
+        if mp_result.pose_landmarks:
+            result['detection'] = True
+            landmarks = mp_result.pose_landmarks[0]
+
+            # Connections
+            for a, b in _POSE_CONNECTIONS:
+                if a < len(landmarks) and b < len(landmarks):
+                    lma, lmb = landmarks[a], landmarks[b]
+                    va = lma.visibility if lma.visibility is not None else 0
+                    vb = lmb.visibility if lmb.visibility is not None else 0
+                    if va > 0.2 and vb > 0.2:
+                        pa = (int(lma.x * width), int(lma.y * height))
+                        pb = (int(lmb.x * width), int(lmb.y * height))
+                        alpha = int(180 * min(va, vb))
+                        cv2.line(lm_vis, pa, pb, (80, 200, 255), 2)
+
+            # Joints
+            for i, lm in enumerate(landmarks):
+                vis = float(lm.visibility) if lm.visibility is not None else 0.0
+                px, py = int(lm.x * width), int(lm.y * height)
+                # Color: green=visible, red=not visible
+                r = int(255 * (1 - vis))
+                g = int(255 * vis)
+                cv2.circle(lm_vis, (px, py), 6, (0, g, r), -1)
+                cv2.circle(lm_vis, (px, py), 6, (220, 220, 220), 1)
+
+                result['landmark_data'].append({
+                    'idx': i,
+                    'name': _JOINT_NAMES[i] if i < len(_JOINT_NAMES) else str(i),
+                    'x': round(float(lm.x), 4),
+                    'y': round(float(lm.y), 4),
+                    'z': round(float(lm.z), 4) if lm.z is not None else 0,
+                    'visibility': round(vis, 3),
+                })
+
+        result['landmarks'] = to_b64(lm_vis)
+
+    except Exception as exc:
+        log.exception("video_debug_frame failed for video %s frame %s", pk, frame_idx)
+        result['error'] = str(exc)
+        result['segmentation'] = result['original']
+        result['landmarks'] = result['original']
+
+    return JsonResponse(result)
+
+
 # ─── Persons ─────────────────────────────────────────────────────────────────
 
 def person_list(request):

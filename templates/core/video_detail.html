@@ -4,6 +4,56 @@
 {% block page_title %}{{ video.filename }}{% endblock %}
 {% block page_sub %}{{ video.folder }} · {{ video.duration_s|floatformat:1 }}s · {{ video.fps|floatformat:0 }}fps · {{ video.resolution }}{% endblock %}
 
+{% block extra_head %}
+<style>
+.tab-bar { display: flex; border-bottom: 1px solid #333; margin-bottom: 20px; gap: 0; }
+.tab-btn {
+  padding: 10px 18px; background: none; border: none; border-bottom: 2px solid transparent;
+  color: #888; font-size: 13px; font-weight: 600; cursor: pointer; font-family: inherit;
+  transition: color .1s, border-color .1s;
+}
+.tab-btn:hover { color: #ccc; }
+.tab-btn.active { color: #c8f060; border-bottom-color: #c8f060; }
+.tab-panel { display: none; }
+.tab-panel.active { display: block; }
+
+/* Debug panel */
+.debug-controls {
+  display: flex; align-items: center; gap: 10px;
+  padding: 12px 16px; border-bottom: 1px solid #333;
+  flex-wrap: wrap;
+}
+.frame-counter { font-family: monospace; font-size: 13px; color: #aaa; min-width: 110px; }
+.debug-imgs { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 1px; background: #333; }
+.debug-img-panel { background: #1a1a1a; }
+.debug-img-label {
+  padding: 8px 12px; font-size: 11px; font-weight: 600; text-transform: uppercase;
+  letter-spacing: .06em; color: #888; border-bottom: 1px solid #333;
+  display: flex; align-items: center; justify-content: space-between;
+}
+.debug-img-panel img { width: 100%; display: block; }
+.debug-img-panel .no-img {
+  aspect-ratio: 16/9; display: flex; align-items: center; justify-content: center;
+  color: #555; font-size: 13px;
+}
+
+/* Landmark table */
+.lm-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace; }
+.lm-table th { padding: 6px 10px; text-align: left; font-size: 10px; text-transform: uppercase;
+  letter-spacing: .06em; color: #666; border-bottom: 1px solid #2a2a2a; }
+.lm-table td { padding: 4px 10px; border-bottom: 1px solid #222; }
+.vis-bar-wrap { width: 80px; background: #2a2a2a; border-radius: 2px; height: 6px; display: inline-block; vertical-align: middle; }
+.vis-bar { height: 6px; border-radius: 2px; }
+
+.debug-loading {
+  display: none; position: absolute; inset: 0;
+  background: rgba(26,26,26,.7); align-items: center; justify-content: center;
+  font-size: 13px; color: #888; z-index: 10;
+}
+.debug-loading.active { display: flex; }
+</style>
+{% endblock %}
+
 {% block topbar_actions %}
 <button class="btn btn-primary btn-sm" onclick="analyzeVideo()">⟳ Personen analysieren</button>
 <form method="post" action="{% url 'video_delete' video.pk %}" onsubmit="return confirm('Video aus DB entfernen?')">
@@ -15,110 +65,202 @@
 
 {% block content %}
 
-<!-- Video Player -->
-<div class="card mb-16">
-  <div class="card-header">Video</div>
-  <div class="card-body" style="padding:0">
-    <video controls style="width:100%;max-height:480px;display:block;background:#000">
-      <source src="{% url 'video_stream' video.pk %}" type="video/mp4">
-    </video>
-  </div>
+<!-- Tab navigation -->
+<div class="tab-bar">
+  <button class="tab-btn active" onclick="switchTab('overview', this)">Übersicht</button>
+  <button class="tab-btn" onclick="switchTab('debug', this)">Pose Debug</button>
 </div>
 
-<!-- Camera Intrinsics -->
-<div class="card mb-16">
-  <div class="card-header">
-    Kamera-Intrinsics
-    <span class="text-muted text-mono text-sm">Für SMPL-X Fitting erforderlich</span>
-  </div>
-  <div class="card-body">
-    <div class="grid-4" style="gap:12px">
-      <div class="form-group">
-        <label>fx (Brennweite X)</label>
-        <input type="number" id="fx" placeholder="z.B. 1080" step="1">
-      </div>
-      <div class="form-group">
-        <label>fy (Brennweite Y)</label>
-        <input type="number" id="fy" placeholder="z.B. 1080" step="1">
-      </div>
-      <div class="form-group">
-        <label>cx (Hauptpunkt X)</label>
-        <input type="number" id="cx" placeholder="z.B. 960" step="1">
-      </div>
-      <div class="form-group">
-        <label>cy (Hauptpunkt Y)</label>
-        <input type="number" id="cy" placeholder="z.B. 540" step="1">
-      </div>
-    </div>
-    <div class="flex gap-8">
-      <button class="btn btn-secondary btn-sm" onclick="estimateIntrinsics()">Auto-Schätzen aus Auflösung</button>
-      <button class="btn btn-ghost btn-sm" onclick="saveIntrinsics()">Speichern</button>
-      <span id="intrinsics-status" class="text-mono text-sm text-muted" style="align-self:center"></span>
-    </div>
-  </div>
-</div>
+<!-- ══ TAB: Übersicht ══════════════════════════════════════════════════════ -->
+<div id="tab-overview" class="tab-panel active">
 
-<!-- Analysis progress -->
-<div id="analyzeProgress" style="display:none" class="card mb-16">
-  <div class="card-body">
-    <div class="flex-center gap-12 mb-8">
-      <span class="fw-700 text-sm">Analyse läuft…</span>
-      <span id="analyzeStage" class="text-mono text-sm text-muted"></span>
-    </div>
-    <div class="progress-bar">
-      <div class="progress-fill running" id="analyzeBar" style="width:0%"></div>
+  <!-- Video Player -->
+  <div class="card mb-16">
+    <div class="card-header">Video</div>
+    <div class="card-body" style="padding:0">
+      <video controls style="width:100%;max-height:480px;display:block;background:#000">
+        <source src="{% url 'video_stream' video.pk %}" type="video/mp4">
+      </video>
     </div>
   </div>
-</div>
 
-<!-- Persons -->
-<div class="card">
-  <div class="card-header">
-    Erkannte Personen
-    <span class="text-muted text-mono text-sm">{{ persons|length }}</span>
-  </div>
-  <div class="card-body">
-    {% if persons %}
-    <div class="person-grid">
-      {% for person in persons %}
-      <div class="person-card" style="cursor:default">
-        {% if person.thumbnail %}
-          <img src="{{ person.thumbnail.url }}" alt="">
-        {% else %}
-          <div style="aspect-ratio:1;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:2rem;color:var(--border2)">◉</div>
-        {% endif %}
-        <div class="person-card-body">
-          <div class="person-card-name">Track {{ person.track_id }}</div>
-          <div class="person-card-sub">{{ person.frame_count }} frames</div>
-          <div class="person-card-sub">Sichtbarkeit {% widthratio person.visibility 1 100 %}%</div>
-          {% with groups=person.groups.all %}
-          {% if groups %}
-            <div class="person-card-sub text-accent" style="margin-top:4px">
-              ◉ {{ groups.0.label|default:"Gruppe" }}
-            </div>
-          {% endif %}
-          {% endwith %}
+  <!-- Camera Intrinsics -->
+  <div class="card mb-16">
+    <div class="card-header">
+      Kamera-Intrinsics
+      <span class="text-muted text-mono text-sm">Für SMPL-X Fitting erforderlich</span>
+    </div>
+    <div class="card-body">
+      <div class="grid-4" style="gap:12px">
+        <div class="form-group">
+          <label>fx (Brennweite X)</label>
+          <input type="number" id="fx" placeholder="z.B. 1080" step="1">
+        </div>
+        <div class="form-group">
+          <label>fy (Brennweite Y)</label>
+          <input type="number" id="fy" placeholder="z.B. 1080" step="1">
+        </div>
+        <div class="form-group">
+          <label>cx (Hauptpunkt X)</label>
+          <input type="number" id="cx" placeholder="z.B. 960" step="1">
+        </div>
+        <div class="form-group">
+          <label>cy (Hauptpunkt Y)</label>
+          <input type="number" id="cy" placeholder="z.B. 540" step="1">
         </div>
       </div>
-      {% endfor %}
+      <div class="flex gap-8">
+        <button class="btn btn-secondary btn-sm" onclick="estimateIntrinsics()">Auto-Schätzen aus Auflösung</button>
+        <button class="btn btn-ghost btn-sm" onclick="saveIntrinsics()">Speichern</button>
+        <span id="intrinsics-status" class="text-mono text-sm text-muted" style="align-self:center"></span>
+      </div>
     </div>
-    {% else %}
-    <div style="text-align:center;padding:40px;color:var(--muted)">
-      <div style="font-size:2rem;margin-bottom:8px">◉</div>
-      Noch keine Personen erkannt.<br>
-      <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="analyzeVideo()">Jetzt analysieren</button>
-    </div>
-    {% endif %}
   </div>
-</div>
+
+  <!-- Analysis progress -->
+  <div id="analyzeProgress" style="display:none" class="card mb-16">
+    <div class="card-body">
+      <div class="flex-center gap-12 mb-8">
+        <span class="fw-700 text-sm">Analyse läuft…</span>
+        <span id="analyzeStage" class="text-mono text-sm text-muted"></span>
+      </div>
+      <div class="progress-bar">
+        <div class="progress-fill running" id="analyzeBar" style="width:0%"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Persons -->
+  <div class="card">
+    <div class="card-header">
+      Erkannte Personen
+      <span class="text-muted text-mono text-sm">{{ persons|length }}</span>
+    </div>
+    <div class="card-body">
+      {% if persons %}
+      <div class="person-grid">
+        {% for person in persons %}
+        <div class="person-card" style="cursor:default">
+          {% if person.thumbnail %}
+            <img src="{{ person.thumbnail.url }}" alt="">
+          {% else %}
+            <div style="aspect-ratio:1;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:2rem;color:var(--border2)">◉</div>
+          {% endif %}
+          <div class="person-card-body">
+            <div class="person-card-name">Track {{ person.track_id }}</div>
+            <div class="person-card-sub">{{ person.frame_count }} frames</div>
+            <div class="person-card-sub">Sichtbarkeit {% widthratio person.visibility 1 100 %}%</div>
+            {% with groups=person.groups.all %}
+            {% if groups %}
+              <div class="person-card-sub text-accent" style="margin-top:4px">
+                ◉ {{ groups.0.label|default:"Gruppe" }}
+              </div>
+            {% endif %}
+            {% endwith %}
+          </div>
+        </div>
+        {% endfor %}
+      </div>
+      {% else %}
+      <div style="text-align:center;padding:40px;color:var(--muted)">
+        <div style="font-size:2rem;margin-bottom:8px">◉</div>
+        Noch keine Personen erkannt.<br>
+        <button class="btn btn-primary btn-sm" style="margin-top:12px" onclick="analyzeVideo()">Jetzt analysieren</button>
+      </div>
+      {% endif %}
+    </div>
+  </div>
+
+</div><!-- /tab-overview -->
+
+
+<!-- ══ TAB: Pose Debug ════════════════════════════════════════════════════ -->
+<div id="tab-debug" class="tab-panel">
+
+  <div class="card" style="position:relative">
+    <!-- Controls -->
+    <div class="debug-controls">
+      <button class="btn btn-primary btn-sm" onclick="debugLoadFrame()">Zufälliger Frame</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(-1)">← Zurück</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(1)">Vor →</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(-10)">−10</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(10)">+10</button>
+      <span class="frame-counter" id="dbgCounter">—</span>
+      <input type="number" id="dbgFrameInput" placeholder="Frame #" min="0"
+             style="width:90px;margin-left:4px" onkeydown="if(event.key==='Enter') debugLoadFrame(parseInt(this.value))">
+    </div>
+
+    <!-- Images -->
+    <div class="debug-imgs" id="dbgImgs" style="min-height:200px">
+      <div class="debug-img-panel">
+        <div class="debug-img-label">
+          1 · Original
+          <span id="dbgResLabel" class="text-muted text-sm"></span>
+        </div>
+        <div class="no-img" id="dbgOrigPlaceholder">Frame wählen →</div>
+        <img id="dbgOrigImg" style="display:none" alt="Original">
+      </div>
+      <div class="debug-img-panel">
+        <div class="debug-img-label">
+          2 · Segmentierungsmaske
+          <span id="dbgSegStatus" class="text-muted text-sm"></span>
+        </div>
+        <div class="no-img" id="dbgSegPlaceholder">—</div>
+        <img id="dbgSegImg" style="display:none" alt="Segmentierung">
+      </div>
+      <div class="debug-img-panel">
+        <div class="debug-img-label">
+          3 · Pose Landmarks
+          <span id="dbgLmStatus" class="text-muted text-sm"></span>
+        </div>
+        <div class="no-img" id="dbgLmPlaceholder">—</div>
+        <img id="dbgLmImg" style="display:none" alt="Landmarks">
+      </div>
+    </div>
+
+    <!-- Loading overlay -->
+    <div class="debug-loading" id="dbgLoading">MediaPipe läuft…</div>
+
+    <!-- Error -->
+    <div id="dbgError" style="display:none;padding:12px 16px;color:#e74c3c;font-size:13px;font-family:monospace;border-top:1px solid #333"></div>
+
+    <!-- Landmark table -->
+    <div id="dbgTableWrap" style="display:none;border-top:1px solid #333">
+      <div style="padding:10px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#666">
+        Landmarks · <span id="dbgDetectionBadge"></span>
+      </div>
+      <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
+        <table class="lm-table">
+          <thead>
+            <tr>
+              <th>#</th><th>Name</th><th>X</th><th>Y</th><th>Z</th><th>Visibility</th><th></th>
+            </tr>
+          </thead>
+          <tbody id="dbgLmTbody"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+</div><!-- /tab-debug -->
+
 {% endblock %}
 
 {% block extra_js %}
 <script>
 const VIDEO_ID = '{{ video.pk }}';
 const DETECTION_STATUS = '{{ video.detection_status }}';
+const DEBUG_URL = '{% url "video_debug_frame" video.pk %}';
 
-// Auto-fill intrinsics from resolution
+// ── Tab switching ─────────────────────────────────────────────────────────
+function switchTab(name, btn) {
+  document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+  document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+  document.getElementById('tab-' + name).classList.add('active');
+  btn.classList.add('active');
+}
+
+// ── Intrinsics ────────────────────────────────────────────────────────────
 function estimateIntrinsics() {
   const res = '{{ video.resolution }}'.split('x');
   if (res.length === 2) {
@@ -133,17 +275,11 @@ function estimateIntrinsics() {
 }
 
 async function saveIntrinsics() {
-  const data = {
-    fx: document.getElementById('fx').value,
-    fy: document.getElementById('fy').value,
-    cx: document.getElementById('cx').value,
-    cy: document.getElementById('cy').value,
-  };
-  // TODO: persist to video metadata via API
   document.getElementById('intrinsics-status').textContent = 'Gespeichert ✓';
   toast('Intrinsics gespeichert');
 }
 
+// ── Detection polling ─────────────────────────────────────────────────────
 let pollInterval = null;
 
 function setAnalyzing() {
@@ -183,9 +319,112 @@ async function analyzeVideo() {
   }
 }
 
-// Resume polling if still detecting after page reload
 if (DETECTION_STATUS === 'detecting') {
   setAnalyzing();
+}
+
+// ── Pose Debug ────────────────────────────────────────────────────────────
+let dbgCurrentFrame = null;
+let dbgTotalFrames  = null;
+
+async function debugLoadFrame(frameIdx) {
+  const loading = document.getElementById('dbgLoading');
+  const errDiv  = document.getElementById('dbgError');
+  loading.classList.add('active');
+  errDiv.style.display = 'none';
+
+  const url = DEBUG_URL + (frameIdx !== undefined ? `?frame=${frameIdx}` : '');
+
+  let d;
+  try {
+    const r = await fetch(url);
+    d = await r.json();
+  } catch(e) {
+    loading.classList.remove('active');
+    errDiv.textContent = 'Netzwerkfehler: ' + e;
+    errDiv.style.display = '';
+    return;
+  }
+
+  loading.classList.remove('active');
+
+  if (d.error && !d.original) {
+    errDiv.textContent = 'Fehler: ' + d.error;
+    errDiv.style.display = '';
+    return;
+  }
+
+  dbgCurrentFrame = d.frame_idx;
+  dbgTotalFrames  = d.total_frames;
+
+  document.getElementById('dbgCounter').textContent = `Frame ${d.frame_idx} / ${d.total_frames - 1}`;
+  document.getElementById('dbgFrameInput').value = d.frame_idx;
+  document.getElementById('dbgResLabel').textContent = `${d.width}×${d.height}`;
+
+  // Images
+  function showImg(imgId, placeholderId, src) {
+    const img = document.getElementById(imgId);
+    const ph  = document.getElementById(placeholderId);
+    if (src) {
+      img.src = src;
+      img.style.display = '';
+      ph.style.display  = 'none';
+    } else {
+      img.style.display = 'none';
+      ph.style.display  = '';
+      ph.textContent    = '—';
+    }
+  }
+  showImg('dbgOrigImg', 'dbgOrigPlaceholder', d.original);
+  showImg('dbgSegImg',  'dbgSegPlaceholder',  d.segmentation);
+  showImg('dbgLmImg',   'dbgLmPlaceholder',   d.landmarks);
+
+  document.getElementById('dbgSegStatus').textContent  = d.segmentation ? '✓' : '—';
+  document.getElementById('dbgLmStatus').textContent   = d.detection ? '✓ Person erkannt' : '✗ Keine Person';
+
+  if (d.error) {
+    errDiv.textContent = 'Warnung: ' + d.error;
+    errDiv.style.display = '';
+  }
+
+  // Landmark table
+  const tableWrap = document.getElementById('dbgTableWrap');
+  const badge     = document.getElementById('dbgDetectionBadge');
+  const tbody     = document.getElementById('dbgLmTbody');
+
+  tableWrap.style.display = '';
+  badge.innerHTML = d.detection
+    ? '<span style="color:#c8f060">Person erkannt</span>'
+    : '<span style="color:#e74c3c">Keine Person gefunden</span>';
+
+  tbody.innerHTML = '';
+  (d.landmark_data || []).forEach(lm => {
+    const vis = lm.visibility;
+    const pct = Math.round(vis * 100);
+    const barColor = vis > 0.7 ? '#c8f060' : vis > 0.4 ? '#f0c860' : '#e74c3c';
+    const tr = document.createElement('tr');
+    if (vis < 0.3) tr.style.opacity = '.45';
+    tr.innerHTML = `
+      <td style="color:#555">${lm.idx}</td>
+      <td>${lm.name}</td>
+      <td>${lm.x.toFixed(3)}</td>
+      <td>${lm.y.toFixed(3)}</td>
+      <td style="color:#555">${lm.z.toFixed(3)}</td>
+      <td>
+        <span class="vis-bar-wrap">
+          <span class="vis-bar" style="width:${pct}%;background:${barColor}"></span>
+        </span>
+        <span style="margin-left:6px;color:${barColor}">${pct}%</span>
+      </td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function debugStep(delta) {
+  if (dbgCurrentFrame === null) { debugLoadFrame(); return; }
+  const next = Math.max(0, Math.min(dbgTotalFrames - 1, dbgCurrentFrame + delta));
+  debugLoadFrame(next);
 }
 </script>
 {% endblock %}
