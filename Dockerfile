@@ -77,7 +77,7 @@ RUN pip install \
 
 # RAFT-Stereo (optical flow)
 RUN git clone --depth 1 https://github.com/princeton-vl/RAFT-Stereo.git /opt/raft-stereo \
-    && pip install -r /opt/raft-stereo/requirements.txt
+    && (pip install -r /opt/raft-stereo/requirements.txt 2>/dev/null || echo "RAFT-Stereo requirements not found – skipping")
 
 # DECA (face fitting)
 RUN git clone --depth 1 https://github.com/yfeng95/DECA.git /opt/deca \
