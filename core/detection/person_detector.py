@@ -15,8 +15,8 @@ import numpy as np
 
 log = logging.getLogger(__name__)
 
-MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-MODEL_PATH = "/tmp/pose_landmarker_lite.task"
+MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
+MODEL_PATH = "/tmp/pose_landmarker_heavy.task"
 
 
 def _ensure_model():

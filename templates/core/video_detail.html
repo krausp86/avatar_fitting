@@ -37,20 +37,14 @@
   color: #555; font-size: 13px;
 }
 
-/* Landmark canvas overlay */
-.lm-img-wrap { position: relative; line-height: 0; }
-.lm-img-wrap canvas {
-  position: absolute; top: 0; left: 0; width: 100%; height: 100%;
-  cursor: crosshair;
+/* Backend comparison rows */
+.backend-row-header {
+  display: flex; align-items: center; gap: 10px;
+  padding: 10px 16px; font-size: 12px; font-weight: 600;
+  text-transform: uppercase; letter-spacing: .06em;
 }
-.lm-tooltip {
-  position: fixed; z-index: 999; pointer-events: none;
-  background: #111; border: 1px solid #444; border-radius: 4px;
-  padding: 6px 10px; font-size: 12px; font-family: monospace;
-  white-space: nowrap; display: none;
-}
-.lm-tooltip .tt-name { font-weight: 700; color: #e0e0e0; }
-.lm-tooltip .tt-vis  { margin-top: 2px; }
+.backend-row-name   { color: #c8f060; }
+.backend-row-status { color: #888; font-weight: 400; text-transform: none; letter-spacing: 0; }
 
 /* Landmark table */
 .lm-table { width: 100%; border-collapse: collapse; font-size: 12px; font-family: monospace; }
@@ -192,70 +186,66 @@
 <!-- ══ TAB: Pose Debug ════════════════════════════════════════════════════ -->
 <div id="tab-debug" class="tab-panel">
 
-  <div class="card" style="position:relative">
-    <!-- Controls -->
+  <!-- Controls card -->
+  <div class="card mb-16">
     <div class="debug-controls">
       <button class="btn btn-primary btn-sm" onclick="debugLoadFrame()">Zufälliger Frame</button>
-      <button class="btn btn-secondary btn-sm" onclick="debugStep(-1)">← Zurück</button>
-      <button class="btn btn-secondary btn-sm" onclick="debugStep(1)">Vor →</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(-1)">← −1</button>
+      <button class="btn btn-secondary btn-sm" onclick="debugStep(1)">+1 →</button>
       <button class="btn btn-secondary btn-sm" onclick="debugStep(-10)">−10</button>
       <button class="btn btn-secondary btn-sm" onclick="debugStep(10)">+10</button>
       <span class="frame-counter" id="dbgCounter">—</span>
       <input type="number" id="dbgFrameInput" placeholder="Frame #" min="0"
-             style="width:90px;margin-left:4px" onkeydown="if(event.key==='Enter') debugLoadFrame(parseInt(this.value))">
+             style="width:90px" onkeydown="if(event.key==='Enter') debugLoadFrame(parseInt(this.value))">
     </div>
+    <!-- Backend toggles injected by JS -->
+    <div id="dbgBackendBar" style="display:flex;flex-wrap:wrap;gap:8px;padding:10px 16px;border-top:1px solid #333">
+      <span style="font-size:11px;color:#666;text-transform:uppercase;letter-spacing:.06em;align-self:center">Backends:</span>
+    </div>
+  </div>
 
-    <!-- Images -->
-    <div class="debug-imgs" id="dbgImgs" style="min-height:200px">
+  <!-- Original + segmentation (MediaPipe, shown once) -->
+  <div class="card mb-16" id="dbgOrigCard" style="display:none">
+    <div class="debug-imgs" style="grid-template-columns:1fr 1fr">
       <div class="debug-img-panel">
-        <div class="debug-img-label">
-          1 · Original
-          <span id="dbgResLabel" class="text-muted text-sm"></span>
-        </div>
-        <div class="no-img" id="dbgOrigPlaceholder">Frame wählen →</div>
-        <img id="dbgOrigImg" style="display:none" alt="Original">
+        <div class="debug-img-label">Original <span id="dbgResLabel" class="text-muted text-sm"></span></div>
+        <img id="dbgOrigImg" style="display:block;width:100%" alt="Original">
       </div>
       <div class="debug-img-panel">
-        <div class="debug-img-label">
-          2 · Segmentierungsmaske
-          <span id="dbgSegStatus" class="text-muted text-sm"></span>
-        </div>
-        <div class="no-img" id="dbgSegPlaceholder">—</div>
-        <img id="dbgSegImg" style="display:none" alt="Segmentierung">
-      </div>
-      <div class="debug-img-panel">
-        <div class="debug-img-label">
-          3 · Pose Landmarks
-          <span id="dbgLmStatus" class="text-muted text-sm"></span>
-        </div>
-        <div class="no-img" id="dbgLmPlaceholder">—</div>
-        <div class="lm-img-wrap" id="dbgLmWrap" style="display:none">
-          <img id="dbgLmImg" style="display:block;width:100%" alt="Landmarks">
-          <canvas id="dbgLmCanvas"></canvas>
-        </div>
+        <div class="debug-img-label">Segmentierung (MediaPipe)</div>
+        <img id="dbgSegImg" style="display:block;width:100%" alt="Segmentierung">
       </div>
     </div>
+  </div>
 
-    <!-- Loading overlay -->
-    <div class="debug-loading" id="dbgLoading">MediaPipe läuft…</div>
+  <!-- Per-backend result rows injected by JS into this container -->
+  <div id="dbgBackendResults"></div>
 
-    <!-- Error -->
-    <div id="dbgError" style="display:none;padding:12px 16px;color:#e74c3c;font-size:13px;font-family:monospace;border-top:1px solid #333"></div>
-
-    <!-- Landmark table -->
-    <div id="dbgTableWrap" style="display:none;border-top:1px solid #333">
-      <div style="padding:10px 16px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.06em;color:#666">
-        Landmarks · <span id="dbgDetectionBadge"></span>
-      </div>
-      <div style="overflow-x:auto;max-height:320px;overflow-y:auto">
-        <table class="lm-table">
-          <thead>
-            <tr>
-              <th>#</th><th>Name</th><th>X</th><th>Y</th><th>Z</th><th>Visibility</th><th></th>
-            </tr>
-          </thead>
-          <tbody id="dbgLmTbody"></tbody>
-        </table>
+  <!-- Combined visualization card (ViTPose body + RTMPose face/hands) -->
+  <div class="card mb-16" id="dbgCombinedCard" style="display:none">
+    <div class="backend-row-header">
+      <span class="backend-row-name">Kombiniert</span>
+      <span style="font-size:11px;color:#666;font-weight:400;margin-left:4px">ViTPose Körper · RTMPose Gesicht &amp; Hände</span>
+      <span class="backend-row-status" id="dbgCombinedStatus" style="margin-left:auto"></span>
+    </div>
+    <!-- legend -->
+    <div style="display:flex;gap:16px;padding:8px 16px;border-top:1px solid #333;font-size:11px;flex-wrap:wrap">
+      <span style="display:flex;align-items:center;gap:5px">
+        <span style="display:inline-block;width:14px;height:3px;background:#3cdc3c;border-radius:2px"></span> Körper (ViTPose)
+      </span>
+      <span style="display:flex;align-items:center;gap:5px">
+        <span style="display:inline-block;width:14px;height:3px;background:#c8d200;border-radius:2px"></span> Gesicht (RTMPose)
+      </span>
+      <span style="display:flex;align-items:center;gap:5px">
+        <span style="display:inline-block;width:14px;height:3px;background:#00a0ff;border-radius:2px"></span> Linke Hand (RTMPose)
+      </span>
+      <span style="display:flex;align-items:center;gap:5px">
+        <span style="display:inline-block;width:14px;height:3px;background:#0064dc;border-radius:2px"></span> Rechte Hand (RTMPose)
+      </span>
+    </div>
+    <div id="dbgCombinedImgWrap" style="border-top:1px solid #333">
+      <div style="padding:40px;text-align:center;color:#555;font-size:13px" id="dbgCombinedPlaceholder">
+        Lade Frame und starte Analyse…
       </div>
     </div>
   </div>
@@ -268,7 +258,6 @@
 <script>
 const VIDEO_ID = '{{ video.pk }}';
 const DETECTION_STATUS = '{{ video.detection_status }}';
-const DEBUG_URL = '{% url "video_debug_frame" video.pk %}';
 
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name, btn) {
@@ -342,108 +331,192 @@ if (DETECTION_STATUS === 'detecting') {
 }
 
 // ── Pose Debug ────────────────────────────────────────────────────────────
+const DEBUG_URL         = '{% url "video_debug_frame" video.pk %}';
+const BACKEND_URL       = '{% url "video_debug_frame_backend" video.pk %}';
+const BACKENDS_LIST_URL = '{% url "video_debug_backends" video.pk %}';
+const COMBINED_URL      = '{% url "video_debug_frame_combined" video.pk %}';
+
 let dbgCurrentFrame = null;
 let dbgTotalFrames  = null;
+let dbgBackends     = [];   // [{id, name, available, enabled}]
+
+// Init: fetch backend list, render checkboxes
+async function initDebugBackends() {
+  try {
+    const r = await fetch(BACKENDS_LIST_URL);
+    const d = await r.json();
+    dbgBackends = d.backends.map(b => ({...b, enabled: b.available}));
+    renderBackendCheckboxes();
+  } catch(e) {
+    console.warn('Could not fetch backends:', e);
+  }
+}
+
+function renderBackendCheckboxes() {
+  const bar = document.getElementById('dbgBackendBar');
+  // Remove old checkboxes (keep label)
+  bar.querySelectorAll('.backend-check').forEach(el => el.remove());
+  dbgBackends.forEach(b => {
+    const label = document.createElement('label');
+    label.className = 'backend-check check-card';
+    if (!b.available) label.style.opacity = '.4';
+    label.title = b.available ? '' : 'Paket nicht installiert';
+    label.innerHTML = `<input type="checkbox" ${b.enabled ? 'checked' : ''} ${!b.available ? 'disabled' : ''}
+      onchange="dbgBackends.find(x=>x.id==='${b.id}').enabled=this.checked"> ${b.name}`;
+    bar.appendChild(label);
+  });
+}
 
 async function debugLoadFrame(frameIdx) {
-  const loading = document.getElementById('dbgLoading');
-  const errDiv  = document.getElementById('dbgError');
-  loading.classList.add('active');
-  errDiv.style.display = 'none';
-
+  // Determine frame
   const url = DEBUG_URL + (frameIdx !== undefined ? `?frame=${frameIdx}` : '');
 
-  let d;
+  // Show loading state on original card
+  document.getElementById('dbgOrigCard').style.display = 'none';
+  document.getElementById('dbgCombinedCard').style.display = 'none';
+  document.getElementById('dbgBackendResults').innerHTML =
+    '<div style="padding:24px;color:#666;font-size:13px">Lädt…</div>';
+
+  let base;
   try {
     const r = await fetch(url);
-    d = await r.json();
+    base = await r.json();
   } catch(e) {
-    loading.classList.remove('active');
-    errDiv.textContent = 'Netzwerkfehler: ' + e;
-    errDiv.style.display = '';
+    document.getElementById('dbgBackendResults').innerHTML =
+      `<div style="padding:24px;color:#e74c3c;font-family:monospace">Netzwerkfehler: ${e}</div>`;
     return;
   }
 
-  loading.classList.remove('active');
-
-  if (d.error && !d.original) {
-    errDiv.textContent = 'Fehler: ' + d.error;
-    errDiv.style.display = '';
+  if (base.error && !base.original) {
+    document.getElementById('dbgBackendResults').innerHTML =
+      `<div style="padding:24px;color:#e74c3c;font-family:monospace">${base.error}</div>`;
     return;
   }
 
-  dbgCurrentFrame = d.frame_idx;
-  dbgTotalFrames  = d.total_frames;
+  dbgCurrentFrame = base.frame_idx;
+  dbgTotalFrames  = base.total_frames;
+  document.getElementById('dbgCounter').textContent = `Frame ${base.frame_idx} / ${base.total_frames - 1}`;
+  document.getElementById('dbgFrameInput').value = base.frame_idx;
+  document.getElementById('dbgResLabel').textContent = `${base.width}×${base.height}`;
 
-  document.getElementById('dbgCounter').textContent = `Frame ${d.frame_idx} / ${d.total_frames - 1}`;
-  document.getElementById('dbgFrameInput').value = d.frame_idx;
-  document.getElementById('dbgResLabel').textContent = `${d.width}×${d.height}`;
+  // Show original + segmentation
+  document.getElementById('dbgOrigImg').src = base.original;
+  document.getElementById('dbgSegImg').src  = base.segmentation || base.original;
+  document.getElementById('dbgOrigCard').style.display = '';
 
-  // Images
-  function showImg(imgId, placeholderId, src, wrapperId) {
-    const img = document.getElementById(imgId);
-    const ph  = document.getElementById(placeholderId);
-    const wrap = wrapperId ? document.getElementById(wrapperId) : null;
-    if (src) {
-      img.src = src;
-      img.style.display = '';
-      if (wrap) wrap.style.display = '';
-      ph.style.display  = 'none';
-    } else {
-      img.style.display = 'none';
-      if (wrap) wrap.style.display = 'none';
-      ph.style.display  = '';
-      ph.textContent    = '—';
-    }
-  }
-  showImg('dbgOrigImg', 'dbgOrigPlaceholder', d.original);
-  showImg('dbgSegImg',  'dbgSegPlaceholder',  d.segmentation);
-  showImg('dbgLmImg',   'dbgLmPlaceholder',   d.landmarks, 'dbgLmWrap');
-
-  if (d.detection && d.landmark_data.length) {
-    setupLmCanvas(d.landmark_data, d.width, d.height);
+  // Build result container: one card per enabled backend
+  const container = document.getElementById('dbgBackendResults');
+  container.innerHTML = '';
+  const enabledBackends = dbgBackends.filter(b => b.enabled);
+  if (!enabledBackends.length) {
+    container.innerHTML = '<div style="padding:24px;color:#666;font-size:13px">Kein Backend ausgewählt.</div>';
+    return;
   }
 
-  document.getElementById('dbgSegStatus').textContent  = d.segmentation ? '✓' : '—';
-  document.getElementById('dbgLmStatus').textContent   = d.detection ? '✓ Person erkannt' : '✗ Keine Person';
+  // Create placeholder cards first
+  enabledBackends.forEach(b => {
+    const card = document.createElement('div');
+    card.className = 'card mb-16';
+    card.id = `dbgCard_${b.id}`;
+    card.innerHTML = `
+      <div class="backend-row-header">
+        <span class="backend-row-name">${b.name}</span>
+        <span class="backend-row-status" id="dbgStatus_${b.id}">Lädt…</span>
+        <button class="btn btn-ghost btn-sm ml-auto" onclick="toggleLmTable('${b.id}')" style="display:none" id="dbgToggle_${b.id}">Landmarks ▾</button>
+      </div>
+      <div id="dbgLmImg_${b.id}" style="border-top:1px solid #333">
+        <div style="padding:40px;text-align:center;color:#555;font-size:13px" id="dbgLmPlaceholder_${b.id}">Lädt…</div>
+      </div>
+      <div id="dbgLmTable_${b.id}" style="display:none;border-top:1px solid #333">
+        <div style="overflow-x:auto;max-height:300px;overflow-y:auto">
+          <table class="lm-table">
+            <thead><tr><th>#</th><th>Name</th><th>X</th><th>Y</th><th>Vis</th></tr></thead>
+            <tbody id="dbgLmTbody_${b.id}"></tbody>
+          </table>
+        </div>
+      </div>
+    `;
+    container.appendChild(card);
+  });
 
+  // Fire all backend requests in parallel, update each card as results arrive
+  enabledBackends.forEach(b => {
+    const backendUrl = `${BACKEND_URL}?frame=${base.frame_idx}&backend=${b.id}`;
+    fetch(backendUrl)
+      .then(r => r.json())
+      .then(d => renderBackendResult(b.id, d))
+      .catch(e => {
+        document.getElementById(`dbgStatus_${b.id}`).textContent = 'Fehler';
+        document.getElementById(`dbgLmPlaceholder_${b.id}`).textContent = String(e);
+      });
+  });
+
+  // Combined visualization (RTMPose + ViTPose)
+  const vitEnabled = dbgBackends.find(b => b.id === 'vitpose' && b.enabled);
+  const rtmEnabled = dbgBackends.find(b => b.id === 'rtmpose' && b.enabled);
+  if (vitEnabled && rtmEnabled) {
+    loadCombined(base.frame_idx);
+  }
+}
+
+function renderBackendResult(backendId, d) {
+  const statusEl = document.getElementById(`dbgStatus_${backendId}`);
+  const imgWrap  = document.getElementById(`dbgLmImg_${backendId}`);
+  const toggleBtn = document.getElementById(`dbgToggle_${backendId}`);
+
+  if (!d.available) {
+    statusEl.style.color = '#e74c3c';
+    statusEl.textContent = 'Nicht verfügbar';
+    imgWrap.innerHTML = `<div style="padding:20px;color:#666;font-size:12px;font-family:monospace">${d.error||''}</div>`;
+    return;
+  }
   if (d.error) {
-    errDiv.textContent = 'Warnung: ' + d.error;
-    errDiv.style.display = '';
+    statusEl.style.color = '#e74c3c';
+    statusEl.textContent = 'Fehler';
+    imgWrap.innerHTML = `<div style="padding:20px;color:#e74c3c;font-size:12px;font-family:monospace">${d.error}</div>`;
+    return;
+  }
+
+  const oobCount = (d.landmark_data||[]).filter(l => l.out_of_bounds).length;
+  statusEl.style.color = d.detection ? '#c8f060' : '#e74c3c';
+  statusEl.textContent = d.detection
+    ? `✓ Person · ${d.landmark_count} Punkte${oobCount ? ` · ${oobCount} OOB` : ''}`
+    : '✗ Keine Person';
+
+  // Landmark image with hover
+  const img = document.createElement('img');
+  img.src = d.landmarks_image;
+  img.style.cssText = 'display:block;width:100%;cursor:crosshair';
+  imgWrap.innerHTML = '';
+  imgWrap.appendChild(img);
+  if (d.landmark_data && d.landmark_data.length) {
+    attachLmHover(img, d.landmark_data);
+    toggleBtn.style.display = '';
   }
 
   // Landmark table
-  const tableWrap = document.getElementById('dbgTableWrap');
-  const badge     = document.getElementById('dbgDetectionBadge');
-  const tbody     = document.getElementById('dbgLmTbody');
-
-  tableWrap.style.display = '';
-  badge.innerHTML = d.detection
-    ? '<span style="color:#c8f060">Person erkannt</span>'
-    : '<span style="color:#e74c3c">Keine Person gefunden</span>';
-
-  tbody.innerHTML = '';
-  (d.landmark_data || []).forEach(lm => {
-    const vis = lm.visibility;
-    const pct = Math.round(vis * 100);
-    const barColor = vis > 0.7 ? '#c8f060' : vis > 0.4 ? '#f0c860' : '#e74c3c';
-    const tr = document.createElement('tr');
-    if (vis < 0.3) tr.style.opacity = '.45';
-    tr.innerHTML = `
+  const tbody = document.getElementById(`dbgLmTbody_${backendId}`);
+  tbody.innerHTML = (d.landmark_data||[]).map(lm => {
+    const vis = lm.visibility, pct = Math.round(vis*100);
+    const col = vis > 0.7 ? '#c8f060' : vis > 0.4 ? '#f0c860' : '#e74c3c';
+    const oob = lm.out_of_bounds;
+    return `<tr style="${oob ? 'background:rgba(255,140,0,.08)' : vis < 0.3 ? 'opacity:.4' : ''}">
       <td style="color:#555">${lm.idx}</td>
-      <td>${lm.name}</td>
-      <td>${lm.x.toFixed(3)}</td>
-      <td>${lm.y.toFixed(3)}</td>
-      <td style="color:#555">${lm.z.toFixed(3)}</td>
-      <td>
-        <span class="vis-bar-wrap">
-          <span class="vis-bar" style="width:${pct}%;background:${barColor}"></span>
-        </span>
-        <span style="margin-left:6px;color:${barColor}">${pct}%</span>
-      </td>
-    `;
-    tbody.appendChild(tr);
-  });
+      <td>${lm.name}${oob ? ' <span style="color:#ff8c00;font-size:10px">OOB</span>' : ''}</td>
+      <td style="${oob?'color:#ff8c00':''}">${lm.x.toFixed(3)}</td>
+      <td style="${oob?'color:#ff8c00':''}">${lm.y.toFixed(3)}</td>
+      <td><span class="vis-bar-wrap"><span class="vis-bar" style="width:${pct}%;background:${col}"></span></span>
+          <span style="margin-left:6px;color:${col}">${pct}%</span></td>
+    </tr>`;
+  }).join('');
+}
+
+function toggleLmTable(backendId) {
+  const t = document.getElementById(`dbgLmTable_${backendId}`);
+  const b = document.getElementById(`dbgToggle_${backendId}`);
+  const open = t.style.display === 'none';
+  t.style.display = open ? '' : 'none';
+  b.textContent = open ? 'Landmarks ▴' : 'Landmarks ▾';
 }
 
 function debugStep(delta) {
@@ -452,37 +525,20 @@ function debugStep(delta) {
   debugLoadFrame(next);
 }
 
-// ── Landmark canvas hover ─────────────────────────────────────────────────
-let dbgLandmarks = [];
-
-function setupLmCanvas(landmarks, imgW, imgH) {
-  dbgLandmarks = landmarks;
-  const canvas  = document.getElementById('dbgLmCanvas');
+// ── Landmark hover (attached per image) ──────────────────────────────────
+function attachLmHover(img, landmarks) {
   const tooltip = document.getElementById('lmTooltip');
-
-  canvas.width  = imgW;
-  canvas.height = imgH;
-
-  canvas.onmousemove = (e) => {
-    const rect  = canvas.getBoundingClientRect();
-    // Map CSS pixels → image pixels
-    const scaleX = imgW / rect.width;
-    const scaleY = imgH / rect.height;
-    const mx = (e.clientX - rect.left) * scaleX;
-    const my = (e.clientY - rect.top)  * scaleY;
-
+  img.onmousemove = (e) => {
+    const rect = img.getBoundingClientRect();
+    const mx = (e.clientX - rect.left) / rect.width;
+    const my = (e.clientY - rect.top)  / rect.height;
     let nearest = null, bestDist = Infinity;
     for (const lm of landmarks) {
-      const px = lm.x * imgW;
-      const py = lm.y * imgH;
-      const d  = Math.hypot(mx - px, my - py);
+      const d = Math.hypot(mx - lm.x, my - lm.y);
       if (d < bestDist) { bestDist = d; nearest = lm; }
     }
-
-    // Only show if within 24px (image coords)
-    if (nearest && bestDist < 24) {
-      const vis = nearest.visibility;
-      const pct = Math.round(vis * 100);
+    if (nearest && bestDist < 0.04) {
+      const vis = nearest.visibility, pct = Math.round(vis*100);
       const col = vis > 0.7 ? '#c8f060' : vis > 0.4 ? '#f0c860' : '#e74c3c';
       document.getElementById('ttName').textContent = `#${nearest.idx} · ${nearest.name}`;
       document.getElementById('ttVis').innerHTML =
@@ -495,10 +551,51 @@ function setupLmCanvas(landmarks, imgW, imgH) {
       tooltip.style.display = 'none';
     }
   };
-
-  canvas.onmouseleave = () => {
-    document.getElementById('lmTooltip').style.display = 'none';
-  };
+  img.onmouseleave = () => { tooltip.style.display = 'none'; };
 }
+
+// ── Combined visualization ────────────────────────────────────────────────────
+function loadCombined(frameIdx) {
+  const card = document.getElementById('dbgCombinedCard');
+  const statusEl = document.getElementById('dbgCombinedStatus');
+  const imgWrap  = document.getElementById('dbgCombinedImgWrap');
+  const placeholder = document.getElementById('dbgCombinedPlaceholder');
+
+  card.style.display = '';
+  imgWrap.innerHTML = '<div style="padding:40px;text-align:center;color:#555;font-size:13px">Lädt (ViTPose + RTMPose)…</div>';
+  statusEl.textContent = 'Lädt…';
+  statusEl.style.color = '#888';
+
+  fetch(`${COMBINED_URL}?frame=${frameIdx}`)
+    .then(r => r.json())
+    .then(d => {
+      if (d.error) {
+        statusEl.style.color = '#e74c3c';
+        statusEl.textContent = 'Fehler';
+        imgWrap.innerHTML = `<div style="padding:20px;color:#e74c3c;font-size:12px;font-family:monospace">${d.error}</div>`;
+        return;
+      }
+      const parts = [];
+      if (d.body_count)  parts.push(`Körper: ${d.body_count}`);
+      if (d.face_count)  parts.push(`Gesicht: ${d.face_count}`);
+      if (d.lhand_count) parts.push(`L.Hand: ${d.lhand_count}`);
+      if (d.rhand_count) parts.push(`R.Hand: ${d.rhand_count}`);
+      statusEl.style.color = d.detection ? '#c8f060' : '#e74c3c';
+      statusEl.textContent = d.detection ? `✓ ${parts.join(' · ')}` : '✗ Keine Person';
+      const img = document.createElement('img');
+      img.src = d.render;
+      img.style.cssText = 'display:block;width:100%';
+      imgWrap.innerHTML = '';
+      imgWrap.appendChild(img);
+    })
+    .catch(e => {
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = 'Fehler';
+      imgWrap.innerHTML = `<div style="padding:20px;color:#666;font-size:12px;font-family:monospace">${e}</div>`;
+    });
+}
+
+// Init backends on page load
+initDebugBackends();
 </script>
 {% endblock %}

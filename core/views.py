@@ -97,163 +97,178 @@ def video_detail(request, pk):
     return render(request, 'core/video_detail.html', {'video': video, 'persons': persons})
 
 
-_POSE_CONNECTIONS = [
-    (0,1),(1,2),(2,3),(3,7),(0,4),(4,5),(5,6),(6,8),
-    (9,10),(11,12),(11,13),(13,15),(15,17),(15,19),(15,21),(17,19),
-    (12,14),(14,16),(16,18),(16,20),(16,22),(18,20),
-    (11,23),(12,24),(23,24),(23,25),(24,26),(25,27),(26,28),
-    (27,29),(28,30),(29,31),(30,32),(27,31),(28,32),
-]
+def _read_video_frame(video_path, frame_param):
+    """Open video, read one frame. Returns (frame_bgr, frame_idx, total_frames, fps) or raises."""
+    import cv2, random as rnd
+    cap = cv2.VideoCapture(video_path)
+    if not cap.isOpened():
+        raise RuntimeError('Video kann nicht geöffnet werden')
+    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    if frame_param is None:
+        frame_idx = rnd.randint(0, max(0, total_frames - 1))
+    else:
+        frame_idx = max(0, min(int(frame_param), total_frames - 1))
+    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+    ret, frame = cap.read()
+    cap.release()
+    if not ret:
+        raise RuntimeError(f'Frame {frame_idx} konnte nicht gelesen werden')
+    return frame, frame_idx, total_frames, fps
 
-_JOINT_NAMES = [
-    'nose','left_eye_inner','left_eye','left_eye_outer',
-    'right_eye_inner','right_eye','right_eye_outer',
-    'left_ear','right_ear','mouth_left','mouth_right',
-    'left_shoulder','right_shoulder','left_elbow','right_elbow',
-    'left_wrist','right_wrist','left_pinky','right_pinky',
-    'left_index','right_index','left_thumb','right_thumb',
-    'left_hip','right_hip','left_knee','right_knee',
-    'left_ankle','right_ankle','left_heel','right_heel',
-    'left_foot_index','right_foot_index',
-]
+
+def _frame_to_b64(img, quality=88):
+    import base64, cv2
+    _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
+    return 'data:image/jpeg;base64,' + base64.b64encode(buf).decode()
+
+
+def _render_segmentation(frame_bgr, mask_float):
+    import cv2
+    import numpy as np
+    seg = frame_bgr.copy()
+    mask_bin = (mask_float > 0.5).astype(np.uint8)
+    overlay = seg.copy()
+    overlay[mask_bin == 1] = [0, 160, 80]
+    seg = cv2.addWeighted(seg, 0.55, overlay, 0.45, 0)
+    contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    cv2.drawContours(seg, contours, -1, (0, 255, 100), 2)
+    return seg
 
 
 def video_debug_frame(request, pk):
-    import base64
-    import random as rnd
-    import numpy as np
-    import cv2
+    """Original-frame + MediaPipe segmentation + landmarks (used by debug tab)."""
+    from .detection.backends import MediaPipeBackend, refresh_availability
 
     video = get_object_or_404(VideoSource, pk=pk)
     if not os.path.exists(video.path):
         return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
 
-    cap = cv2.VideoCapture(video.path)
-    if not cap.isOpened():
-        return JsonResponse({'error': 'Video kann nicht geöffnet werden'}, status=500)
+    try:
+        frame, frame_idx, total_frames, fps = _read_video_frame(
+            video.path, request.GET.get('frame'))
+    except RuntimeError as e:
+        return JsonResponse({'error': str(e)}, status=500)
 
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-
-    frame_param = request.GET.get('frame')
-    if frame_param is None:
-        frame_idx = rnd.randint(0, max(0, total_frames - 1))
-    else:
-        frame_idx = max(0, min(int(frame_param), total_frames - 1))
-
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret:
-        return JsonResponse({'error': f'Frame {frame_idx} konnte nicht gelesen werden'}, status=500)
-
-    height, width = frame.shape[:2]
-
-    def to_b64(img, quality=88):
-        _, buf = cv2.imencode('.jpg', img, [cv2.IMWRITE_JPEG_QUALITY, quality])
-        return 'data:image/jpeg;base64,' + base64.b64encode(buf).decode()
-
+    h, w = frame.shape[:2]
     result = {
-        'frame_idx': frame_idx,
-        'total_frames': total_frames,
-        'fps': round(fps, 2),
-        'width': width,
-        'height': height,
-        'detection': False,
-        'landmark_data': [],
-        'original': to_b64(frame),
-        'segmentation': None,
-        'landmarks': None,
-        'error': None,
+        'frame_idx': frame_idx, 'total_frames': total_frames,
+        'fps': round(fps, 2), 'width': w, 'height': h,
+        'detection': False, 'landmark_data': [],
+        'original': _frame_to_b64(frame),
+        'segmentation': None, 'landmarks': None, 'error': None,
     }
 
+    refresh_availability()
+    if not MediaPipeBackend.available:
+        result['error'] = 'pose-worker nicht erreichbar oder mediapipe nicht verfügbar'
+        return JsonResponse(result)
+
     try:
-        import mediapipe as mp
-        from .detection.person_detector import _ensure_model, MODEL_PATH
-
-        _ensure_model()
-
-        BaseOptions          = mp.tasks.BaseOptions
-        PoseLandmarker       = mp.tasks.vision.PoseLandmarker
-        PoseLandmarkerOptions = mp.tasks.vision.PoseLandmarkerOptions
-        VisionRunningMode    = mp.tasks.vision.RunningMode
-
-        options = PoseLandmarkerOptions(
-            base_options=BaseOptions(
-                model_asset_path=MODEL_PATH,
-                delegate=BaseOptions.Delegate.CPU,
-            ),
-            running_mode=VisionRunningMode.IMAGE,
-            output_segmentation_masks=True,
-            num_poses=1,
-        )
-
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
-
-        with PoseLandmarker.create_from_options(options) as landmarker:
-            mp_result = landmarker.detect(mp_image)
-
-        # ── Segmentation mask ────────────────────────────────────────────────
-        seg_vis = frame.copy()
-        if mp_result.segmentation_masks:
-            mask = mp_result.segmentation_masks[0].numpy_view()
-            if mask.ndim == 3:
-                mask = mask[:, :, 0]
-            mask_bin = (mask > 0.5).astype(np.uint8)
-            overlay = seg_vis.copy()
-            overlay[mask_bin == 1] = [0, 160, 80]
-            seg_vis = cv2.addWeighted(seg_vis, 0.55, overlay, 0.45, 0)
-            # Contour
-            contours, _ = cv2.findContours(mask_bin, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            cv2.drawContours(seg_vis, contours, -1, (0, 255, 100), 2)
-        result['segmentation'] = to_b64(seg_vis)
-
-        # ── Landmarks ────────────────────────────────────────────────────────
-        lm_vis = frame.copy()
-        if mp_result.pose_landmarks:
-            result['detection'] = True
-            landmarks = mp_result.pose_landmarks[0]
-
-            # Connections
-            for a, b in _POSE_CONNECTIONS:
-                if a < len(landmarks) and b < len(landmarks):
-                    lma, lmb = landmarks[a], landmarks[b]
-                    va = lma.visibility if lma.visibility is not None else 0
-                    vb = lmb.visibility if lmb.visibility is not None else 0
-                    if va > 0.2 and vb > 0.2:
-                        pa = (int(lma.x * width), int(lma.y * height))
-                        pb = (int(lmb.x * width), int(lmb.y * height))
-                        alpha = int(180 * min(va, vb))
-                        cv2.line(lm_vis, pa, pb, (80, 200, 255), 2)
-
-            # Joints
-            for i, lm in enumerate(landmarks):
-                vis = float(lm.visibility) if lm.visibility is not None else 0.0
-                px, py = int(lm.x * width), int(lm.y * height)
-                # Color: green=visible, red=not visible
-                r = int(255 * (1 - vis))
-                g = int(255 * vis)
-                cv2.circle(lm_vis, (px, py), 6, (0, g, r), -1)
-                cv2.circle(lm_vis, (px, py), 6, (220, 220, 220), 1)
-
-                result['landmark_data'].append({
-                    'idx': i,
-                    'name': _JOINT_NAMES[i] if i < len(_JOINT_NAMES) else str(i),
-                    'x': round(float(lm.x), 4),
-                    'y': round(float(lm.y), 4),
-                    'z': round(float(lm.z), 4) if lm.z is not None else 0,
-                    'visibility': round(vis, 3),
-                })
-
-        result['landmarks'] = to_b64(lm_vis)
-
+        data = MediaPipeBackend.analyze(frame, include_segmentation=True)
+        result['segmentation']  = _frame_to_b64(data['segmentation'] if data['segmentation'] is not None else frame)
+        result['landmarks']     = _frame_to_b64(data['render'])
+        result['detection']     = data['detection']
+        result['landmark_data'] = data['landmarks']
     except Exception as exc:
         log.exception("video_debug_frame failed for video %s frame %s", pk, frame_idx)
         result['error'] = str(exc)
         result['segmentation'] = result['original']
-        result['landmarks'] = result['original']
+        result['landmarks']    = result['original']
+
+    return JsonResponse(result)
+
+
+def video_debug_frame_combined(request, pk):
+    """Run ViTPose + RTMPose on a frame and return the combined body+face+hands render."""
+    from .detection.backends import combined_analyze, RTMPoseBackend, ViTPoseBackend, refresh_availability
+
+    video = get_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    frame_param = request.GET.get('frame')
+    if frame_param is None:
+        return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
+
+    refresh_availability()
+    if not (RTMPoseBackend.available and ViTPoseBackend.available):
+        return JsonResponse({'error': 'RTMPose und/oder ViTPose nicht verfügbar'}, status=503)
+
+    try:
+        frame, frame_idx, _, _ = _read_video_frame(video.path, frame_param)
+        data = combined_analyze(frame)
+        return JsonResponse({
+            'frame_idx':      frame_idx,
+            'detection':      data['detection'],
+            'body_count':     data['body_count'],
+            'face_count':     data['face_count'],
+            'lhand_count':    data['lhand_count'],
+            'rhand_count':    data['rhand_count'],
+            'render':         _frame_to_b64(data['render']),
+        })
+    except Exception as exc:
+        log.exception("video_debug_frame_combined failed: video=%s frame=%s", pk, frame_param)
+        return JsonResponse({'error': str(exc)}, status=500)
+
+
+def video_debug_backends(request, pk):
+    """List all backends and their availability (proxied from pose-worker)."""
+    from .detection.backends import ALL_BACKENDS, refresh_availability
+    refresh_availability()
+    return JsonResponse({'backends': [
+        {'id': b.backend_id, 'name': b.display_name, 'available': b.available}
+        for b in ALL_BACKENDS
+    ]})
+
+
+def video_debug_frame_backend(request, pk):
+    """Run a single backend on a specific frame for the comparison view."""
+    from .detection.backends import BACKEND_BY_ID, refresh_availability
+
+    backend_id = request.GET.get('backend', 'mediapipe')
+    backend = BACKEND_BY_ID.get(backend_id)
+    if backend is None:
+        return JsonResponse({'error': f'Unbekanntes Backend: {backend_id}'}, status=400)
+
+    video = get_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    frame_param = request.GET.get('frame')
+    if frame_param is None:
+        return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
+
+    refresh_availability()
+    result = {
+        'frame_idx': int(frame_param),
+        'backend': backend_id,
+        'backend_name': backend.display_name,
+        'available': backend.available,
+        'detection': False,
+        'landmark_count': 0,
+        'landmark_data': [],
+        'landmarks_image': None,
+        'error': None,
+    }
+
+    if not backend.available:
+        result['error'] = 'Backend nicht verfügbar (pose-worker nicht erreichbar oder Paket fehlt)'
+        return JsonResponse(result)
+
+    try:
+        frame, frame_idx, _ , _ = _read_video_frame(video.path, frame_param)
+        result['frame_idx'] = frame_idx
+
+        data = backend.analyze(frame)
+        result['detection']       = data['detection']
+        result['landmark_count']  = data['landmark_count']
+        result['landmark_data']   = data['landmarks']
+        result['landmarks_image'] = _frame_to_b64(data['render'])
+    except Exception as exc:
+        log.exception("video_debug_frame_backend failed: video=%s frame=%s backend=%s",
+                      pk, frame_param, backend_id)
+        result['error'] = str(exc)
 
     return JsonResponse(result)
 

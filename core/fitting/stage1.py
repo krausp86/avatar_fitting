@@ -756,15 +756,8 @@ def _extract_keypoints(frames: List[np.ndarray]) -> np.ndarray:
         return np.zeros((len(frames), n_joints, 3), dtype=np.float32)
 
     # Same model file used by person_detector.py
-    MODEL_PATH = "/tmp/pose_landmarker_lite.task"
-    if not os.path.exists(MODEL_PATH):
-        import urllib.request
-        MODEL_URL = (
-            "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
-            "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
-        )
-        log.info("Downloading MediaPipe pose model to %s …", MODEL_PATH)
-        urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
+    from core.detection.person_detector import _ensure_model, MODEL_PATH
+    _ensure_model()
 
     options = mp.tasks.vision.PoseLandmarkerOptions(
         base_options=mp.tasks.BaseOptions(
@@ -785,7 +778,10 @@ def _extract_keypoints(frames: List[np.ndarray]) -> np.ndarray:
                 lm = results.pose_landmarks[0]   # first detected person
                 for i, mp_idx in enumerate(_MP_IDX):
                     p = lm[mp_idx]
-                    row[i] = [p.x, p.y, p.visibility]
+                    # Out-of-bounds landmarks are extrapolated and unreliable
+                    if 0.0 <= p.x <= 1.0 and 0.0 <= p.y <= 1.0:
+                        row[i] = [p.x, p.y, p.visibility]
+                    # else: row stays zero (visibility=0, ignored in loss)
             kp_all.append(row)
 
     return np.array(kp_all, dtype=np.float32)   # (N, n_joints, 3)

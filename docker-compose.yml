@@ -12,6 +12,26 @@ services:
       timeout: 3s
       retries: 5
 
+  # ── Pose estimation worker (all ML backends) ────────────────────────────────
+  pose-worker:
+    build:
+      context: ./pose_worker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    environment:
+      - MEDIAPIPE_DISABLE_GPU=1
+      - HOME=/tmp
+      - PYOPENGL_PLATFORM=egl
+      - DISPLAY=
+    volumes:
+      - ${MODELS_DIR:-./models}:/data/models:ro
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
   # ── Django ASGI app ─────────────────────────────────────────────────────────
   web:
     build:
@@ -21,6 +41,8 @@ services:
     restart: unless-stopped
     depends_on:
       redis:
+        condition: service_healthy
+      pose-worker:
         condition: service_healthy
     env_file:
       - .env
@@ -35,6 +57,7 @@ services:
       - SMPLX_MODEL_DIR=/data/models
       - DATABASE_URL=/data/db/db.sqlite3
       - MEDIAPIPE_DISABLE_GPU=1
+      - POSE_WORKER_URL=http://pose-worker:8001
       - TZ=Europe/Vienna
       - HOME=/tmp
       - PYOPENGL_PLATFORM=egl

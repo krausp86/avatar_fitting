@@ -11,12 +11,13 @@ ENV DEBIAN_FRONTEND=noninteractive \
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git wget curl \
+    gcc g++ \
     libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
     libgles2 libegl1 libgbm1 \
     ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools wheel
+RUN pip install --upgrade pip setuptools wheel packaging
 
 COPY requirements-ml.txt /tmp/requirements-ml.txt
 RUN pip install \
