@@ -10,8 +10,12 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
+import threading
+
 import cv2
 import numpy as np
+
+_MODEL_LOAD_LOCK = threading.Lock()
 
 from joint_definitions import (
     COCO17_CONNECTIONS,
@@ -94,9 +98,11 @@ class PoseBackend(ABC):
     @classmethod
     def _get_model(cls):
         if cls.backend_id not in _MODEL_CACHE:
-            log.info("Loading backend model: %s", cls.backend_id)
-            _MODEL_CACHE[cls.backend_id] = cls._load_model()
-            log.info("Backend model ready: %s", cls.backend_id)
+            with _MODEL_LOAD_LOCK:
+                if cls.backend_id not in _MODEL_CACHE:  # re-check after acquiring
+                    log.info("Loading backend model: %s", cls.backend_id)
+                    _MODEL_CACHE[cls.backend_id] = cls._load_model()
+                    log.info("Backend model ready: %s", cls.backend_id)
         return _MODEL_CACHE[cls.backend_id]
 
     @classmethod
@@ -186,14 +192,20 @@ class _MMPoseBackend(PoseBackend):
     @classmethod
     def _load_model(cls):
         from mmpose.apis import MMPoseInferencer
-        from mmengine.registry import DefaultScope
-        import torch
+        from mmengine.registry import DefaultScope, MODELS
+        import torch, uuid
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         log.info("MMPose using device: %s", device)
-        # Some model configs (e.g. ViTPose td-hm) incorrectly default to mmdet scope.
-        # Explicitly set mmpose scope before building.
-        DefaultScope.get_instance('mmpose_default', scope_name='mmpose')
-        return MMPoseInferencer(pose2d=cls._mmpose_model_alias, device=device)
+        # Fresh uuid scope → mmengine always creates a new active DefaultScope.
+        # The lock in _get_model ensures only one mmpose model loads at a time,
+        # preventing mmdet from clobbering the active scope mid-build.
+        scope_name = str(uuid.uuid4())
+        DefaultScope.get_instance(scope_name, scope_name='mmpose')
+        try:
+            return MMPoseInferencer(pose2d=cls._mmpose_model_alias, device=device)
+        finally:
+            # Always restore mmpose scope after build (mmdet may have switched it).
+            DefaultScope.get_instance(str(uuid.uuid4()), scope_name='mmpose')
 
     @classmethod
     def detect(cls, frame_bgr: np.ndarray) -> List[Dict]:

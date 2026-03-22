@@ -54,14 +54,6 @@ class PoseBackend:
     @classmethod
     def analyze(cls, frame_bgr: np.ndarray,
                 include_segmentation: bool = False) -> Dict:
-        """
-        Send frame to pose-worker and return combined result dict:
-          landmarks       – list of landmark dicts
-          detection       – bool
-          landmark_count  – int
-          render          – np.ndarray (annotated frame)
-          segmentation    – np.ndarray or None (only for mediapipe)
-        """
         import httpx
         payload = {
             "backend": cls.backend_id,
@@ -72,6 +64,28 @@ class PoseBackend:
         resp = httpx.post(
             f"{POSE_WORKER_URL}/analyze", json=payload, timeout=3600.0
         )
+        resp.raise_for_status()
+        data = resp.json()
+        return {
+            "landmarks":      data.get("landmarks", []),
+            "detection":      data.get("detection", False),
+            "landmark_count": data.get("landmark_count", 0),
+            "render":         _decode_image(data["render_b64"]) if data.get("render_b64") else frame_bgr,
+            "segmentation":   _decode_image(data["segmentation_b64"]) if data.get("segmentation_b64") else None,
+        }
+
+    @classmethod
+    async def async_analyze(cls, frame_bgr: np.ndarray,
+                            include_segmentation: bool = False) -> Dict:
+        import httpx
+        payload = {
+            "backend": cls.backend_id,
+            "frame_b64": _encode_frame(frame_bgr),
+            "include_render": True,
+            "include_segmentation": include_segmentation,
+        }
+        async with httpx.AsyncClient(timeout=3600.0) as client:
+            resp = await client.post(f"{POSE_WORKER_URL}/analyze", json=payload)
         resp.raise_for_status()
         data = resp.json()
         return {
@@ -117,11 +131,50 @@ def refresh_availability():
         backend_cls.available = info.get(backend_cls.backend_id, False)
 
 
+async def async_refresh_availability():
+    """Async version of refresh_availability."""
+    global _BACKENDS_CACHE
+    try:
+        import httpx
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            resp = await client.get(f"{POSE_WORKER_URL}/backends")
+        resp.raise_for_status()
+        _BACKENDS_CACHE = resp.json()["backends"]
+    except Exception as e:
+        log.warning("Could not reach pose-worker at %s: %s", POSE_WORKER_URL, e)
+        _BACKENDS_CACHE = []
+    info = {b['id']: b['available'] for b in _BACKENDS_CACHE}
+    for backend_cls in ALL_BACKENDS:
+        backend_cls.available = info.get(backend_cls.backend_id, False)
+
+
 def combined_analyze(frame_bgr) -> dict:
     """Call /analyze/combined on pose-worker. Returns combined result dict."""
     import httpx
     payload = {"frame_b64": _encode_frame(frame_bgr)}
     resp = httpx.post(f"{POSE_WORKER_URL}/analyze/combined", json=payload, timeout=3600.0)
+    resp.raise_for_status()
+    data = resp.json()
+    return {
+        "detection":       data.get("detection", False),
+        "body_count":      data.get("body_count", 0),
+        "face_count":      data.get("face_count", 0),
+        "lhand_count":     data.get("lhand_count", 0),
+        "rhand_count":     data.get("rhand_count", 0),
+        "body_landmarks":  data.get("body_landmarks", []),
+        "face_landmarks":  data.get("face_landmarks", []),
+        "lhand_landmarks": data.get("lhand_landmarks", []),
+        "rhand_landmarks": data.get("rhand_landmarks", []),
+        "render":          _decode_image(data["render_b64"]) if data.get("render_b64") else frame_bgr,
+    }
+
+
+async def async_combined_analyze(frame_bgr) -> dict:
+    """Async version – doesn't block the event loop while waiting for pose-worker."""
+    import httpx
+    payload = {"frame_b64": _encode_frame(frame_bgr)}
+    async with httpx.AsyncClient(timeout=3600.0) as client:
+        resp = await client.post(f"{POSE_WORKER_URL}/analyze/combined", json=payload)
     resp.raise_for_status()
     data = resp.json()
     return {

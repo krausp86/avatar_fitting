@@ -1,7 +1,7 @@
 import os
 import json
 from pathlib import Path
-from django.shortcuts import render, get_object_or_404, redirect
+from django.shortcuts import render, get_object_or_404, redirect, aget_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
 from django.conf import settings
@@ -136,17 +136,19 @@ def _render_segmentation(frame_bgr, mask_float):
     return seg
 
 
-def video_debug_frame(request, pk):
+async def video_debug_frame(request, pk):
     """Original-frame + MediaPipe segmentation + landmarks (used by debug tab)."""
-    from .detection.backends import MediaPipeBackend, refresh_availability
+    import asyncio
+    from django.core.cache import cache
+    from .detection.backends import MediaPipeBackend
 
-    video = get_object_or_404(VideoSource, pk=pk)
+    video = await aget_object_or_404(VideoSource, pk=pk)
     if not os.path.exists(video.path):
         return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
 
     try:
-        frame, frame_idx, total_frames, fps = _read_video_frame(
-            video.path, request.GET.get('frame'))
+        frame, frame_idx, total_frames, fps = await asyncio.to_thread(
+            _read_video_frame, video.path, request.GET.get('frame'))
     except RuntimeError as e:
         return JsonResponse({'error': str(e)}, status=500)
 
@@ -159,17 +161,22 @@ def video_debug_frame(request, pk):
         'segmentation': None, 'landmarks': None, 'error': None,
     }
 
-    refresh_availability()
-    if not MediaPipeBackend.available:
-        result['error'] = 'pose-worker nicht erreichbar oder mediapipe nicht verfügbar'
+    cache_key = f'pose_debug:mediapipe:{pk}:{frame_idx}'
+    cached = await cache.aget(cache_key)
+    if cached:
+        result.update(cached)
         return JsonResponse(result)
 
     try:
-        data = MediaPipeBackend.analyze(frame, include_segmentation=True)
-        result['segmentation']  = _frame_to_b64(data['segmentation'] if data['segmentation'] is not None else frame)
-        result['landmarks']     = _frame_to_b64(data['render'])
-        result['detection']     = data['detection']
-        result['landmark_data'] = data['landmarks']
+        data = await MediaPipeBackend.async_analyze(frame, include_segmentation=True)
+        payload = {
+            'segmentation':  _frame_to_b64(data['segmentation'] if data['segmentation'] is not None else frame),
+            'landmarks':     _frame_to_b64(data['render']),
+            'detection':     data['detection'],
+            'landmark_data': data['landmarks'],
+        }
+        await cache.aset(cache_key, payload)
+        result.update(payload)
     except Exception as exc:
         log.exception("video_debug_frame failed for video %s frame %s", pk, frame_idx)
         result['error'] = str(exc)
@@ -179,11 +186,13 @@ def video_debug_frame(request, pk):
     return JsonResponse(result)
 
 
-def video_debug_frame_combined(request, pk):
+async def video_debug_frame_combined(request, pk):
     """Run ViTPose + RTMPose on a frame and return the combined body+face+hands render."""
-    from .detection.backends import combined_analyze, RTMPoseBackend, ViTPoseBackend, refresh_availability
+    import asyncio
+    from django.core.cache import cache
+    from .detection.backends import async_combined_analyze, RTMPoseBackend, ViTPoseBackend
 
-    video = get_object_or_404(VideoSource, pk=pk)
+    video = await aget_object_or_404(VideoSource, pk=pk)
     if not os.path.exists(video.path):
         return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
 
@@ -191,14 +200,20 @@ def video_debug_frame_combined(request, pk):
     if frame_param is None:
         return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
 
-    refresh_availability()
+    frame, frame_idx, _, _ = await asyncio.to_thread(
+        _read_video_frame, video.path, frame_param)
+
+    cache_key = f'pose_debug:combined:{pk}:{frame_idx}'
+    cached = await cache.aget(cache_key)
+    if cached:
+        return JsonResponse(cached)
+
     if not (RTMPoseBackend.available and ViTPoseBackend.available):
         return JsonResponse({'error': 'RTMPose und/oder ViTPose nicht verfügbar'}, status=503)
 
     try:
-        frame, frame_idx, _, _ = _read_video_frame(video.path, frame_param)
-        data = combined_analyze(frame)
-        return JsonResponse({
+        data = await async_combined_analyze(frame)
+        response = {
             'frame_idx':      frame_idx,
             'detection':      data['detection'],
             'body_count':     data['body_count'],
@@ -206,32 +221,36 @@ def video_debug_frame_combined(request, pk):
             'lhand_count':    data['lhand_count'],
             'rhand_count':    data['rhand_count'],
             'render':         _frame_to_b64(data['render']),
-        })
+        }
+        await cache.aset(cache_key, response)
+        return JsonResponse(response)
     except Exception as exc:
         log.exception("video_debug_frame_combined failed: video=%s frame=%s", pk, frame_param)
         return JsonResponse({'error': str(exc)}, status=500)
 
 
-def video_debug_backends(request, pk):
+async def video_debug_backends(request, pk):
     """List all backends and their availability (proxied from pose-worker)."""
-    from .detection.backends import ALL_BACKENDS, refresh_availability
-    refresh_availability()
+    from .detection.backends import ALL_BACKENDS, async_refresh_availability
+    await async_refresh_availability()
     return JsonResponse({'backends': [
         {'id': b.backend_id, 'name': b.display_name, 'available': b.available}
         for b in ALL_BACKENDS
     ]})
 
 
-def video_debug_frame_backend(request, pk):
+async def video_debug_frame_backend(request, pk):
     """Run a single backend on a specific frame for the comparison view."""
-    from .detection.backends import BACKEND_BY_ID, refresh_availability
+    import asyncio
+    from django.core.cache import cache
+    from .detection.backends import BACKEND_BY_ID
 
     backend_id = request.GET.get('backend', 'mediapipe')
     backend = BACKEND_BY_ID.get(backend_id)
     if backend is None:
         return JsonResponse({'error': f'Unbekanntes Backend: {backend_id}'}, status=400)
 
-    video = get_object_or_404(VideoSource, pk=pk)
+    video = await aget_object_or_404(VideoSource, pk=pk)
     if not os.path.exists(video.path):
         return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
 
@@ -239,17 +258,24 @@ def video_debug_frame_backend(request, pk):
     if frame_param is None:
         return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
 
-    refresh_availability()
+    frame, frame_idx, _, _ = await asyncio.to_thread(
+        _read_video_frame, video.path, frame_param)
+
+    cache_key = f'pose_debug:{backend_id}:{pk}:{frame_idx}'
+    cached = await cache.aget(cache_key)
+    if cached:
+        return JsonResponse(cached)
+
     result = {
-        'frame_idx': int(frame_param),
-        'backend': backend_id,
-        'backend_name': backend.display_name,
-        'available': backend.available,
-        'detection': False,
+        'frame_idx':      frame_idx,
+        'backend':        backend_id,
+        'backend_name':   backend.display_name,
+        'available':      backend.available,
+        'detection':      False,
         'landmark_count': 0,
-        'landmark_data': [],
+        'landmark_data':  [],
         'landmarks_image': None,
-        'error': None,
+        'error':          None,
     }
 
     if not backend.available:
@@ -257,14 +283,12 @@ def video_debug_frame_backend(request, pk):
         return JsonResponse(result)
 
     try:
-        frame, frame_idx, _ , _ = _read_video_frame(video.path, frame_param)
-        result['frame_idx'] = frame_idx
-
-        data = backend.analyze(frame)
+        data = await backend.async_analyze(frame)
         result['detection']       = data['detection']
         result['landmark_count']  = data['landmark_count']
         result['landmark_data']   = data['landmarks']
         result['landmarks_image'] = _frame_to_b64(data['render'])
+        await cache.aset(cache_key, result)
     except Exception as exc:
         log.exception("video_debug_frame_backend failed: video=%s frame=%s backend=%s",
                       pk, frame_param, backend_id)

@@ -87,9 +87,22 @@ if REDIS_URL:
             'CONFIG':  {'hosts': [REDIS_URL]},
         }
     }
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.redis.RedisCache',
+            'LOCATION': REDIS_URL,
+            'TIMEOUT': 60 * 60 * 24 * 7,  # 7 days
+        }
+    }
 else:
     CHANNEL_LAYERS = {
         'default': {
             'BACKEND': 'channels.layers.InMemoryChannelLayer',
+        }
+    }
+    CACHES = {
+        'default': {
+            'BACKEND': 'django.core.cache.backends.locmem.LocMemCache',
+            'TIMEOUT': 60 * 60 * 24 * 7,
         }
     }
