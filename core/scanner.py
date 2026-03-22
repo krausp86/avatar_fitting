@@ -4,8 +4,10 @@ Walks VIDEO_SCAN_ROOT and registers new MP4/MOV/AVI files in the database,
 then runs person detection to populate DetectedPerson records.
 """
 import io
+import json
 import logging
 import os
+import subprocess
 from pathlib import Path
 
 import cv2
@@ -13,6 +15,39 @@ import cv2
 from .models import DetectedPerson, VideoSource
 
 log = logging.getLogger(__name__)
+
+
+def _ffprobe_metadata(path: str) -> dict:
+    """Return {fps, frame_count, width, height} via ffprobe, or empty dict on failure."""
+    try:
+        result = subprocess.run(
+            [
+                "ffprobe", "-v", "quiet", "-print_format", "json",
+                "-show_streams", "-select_streams", "v:0", path,
+            ],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode != 0:
+            return {}
+        info = json.loads(result.stdout)
+        stream = (info.get("streams") or [{}])[0]
+        width  = int(stream.get("width", 0))
+        height = int(stream.get("height", 0))
+        # fps: "30000/1001" or "30/1"
+        fps_raw = stream.get("r_frame_rate", "0/1")
+        num, den = (int(x) for x in fps_raw.split("/"))
+        fps = num / den if den else 0.0
+        nb_frames = stream.get("nb_frames")
+        if nb_frames:
+            frame_count = int(nb_frames)
+        else:
+            # Fallback: duration * fps
+            dur = float(stream.get("duration", 0) or 0)
+            frame_count = int(dur * fps) if fps else 0
+        return {"fps": fps, "frame_count": frame_count, "width": width, "height": height}
+    except Exception:
+        log.debug("ffprobe failed for %s", path, exc_info=True)
+        return {}
 
 VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.mkv', '.webm'}
 
@@ -43,16 +78,24 @@ def scan_video_folder(root: str) -> int:
 
 
 def _populate_metadata(vs: VideoSource):
-    """Read duration/fps/resolution via OpenCV and save a video thumbnail."""
+    """Read duration/fps/resolution via ffprobe (fallback: OpenCV) and save a video thumbnail."""
     try:
         cap = cv2.VideoCapture(vs.path)
         if not cap.isOpened():
             return
 
-        fps        = cap.get(cv2.CAP_PROP_FPS)
-        frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-        w          = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
-        h          = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
+        # Prefer ffprobe — more reliable across codecs/platforms
+        meta = _ffprobe_metadata(vs.path)
+        if meta and meta["fps"] > 0:
+            fps         = meta["fps"]
+            frame_count = meta["frame_count"]
+            w           = meta["width"]
+            h           = meta["height"]
+        else:
+            fps        = cap.get(cv2.CAP_PROP_FPS)
+            frame_count = cap.get(cv2.CAP_PROP_FRAME_COUNT)
+            w          = int(cap.get(cv2.CAP_PROP_FRAME_WIDTH))
+            h          = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
 
         vs.fps        = fps
         vs.duration_s = frame_count / fps if fps > 0 else None
