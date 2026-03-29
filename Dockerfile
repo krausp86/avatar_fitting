@@ -74,10 +74,10 @@ FROM base-ml AS fitting
 COPY requirements-fitting.txt /tmp/requirements-fitting.txt
 RUN python3.11 -m pip install -r /tmp/requirements-fitting.txt
 
-# pytorch3d (build from source for CUDA compatibility)
-RUN python3.11 -m pip install \
-    "git+https://github.com/facebookresearch/pytorch3d.git@stable" \
-    || echo "pytorch3d build failed – falling back to CPU render"
+# simple_romp: setup.py imports Cython directly without declaring it as build dep,
+# so --no-build-isolation is required (uses already-installed Cython from above).
+# This step invalidates automatically when requirements-fitting.txt changes.
+RUN python3.11 -m pip install simple_romp --no-build-isolation
 
 # RAFT-Stereo (optical flow)
 RUN git clone --depth 1 https://github.com/princeton-vl/RAFT-Stereo.git /opt/raft-stereo \

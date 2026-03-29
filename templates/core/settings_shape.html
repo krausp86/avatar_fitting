@@ -1,0 +1,57 @@
+{% extends "base.html" %}
+{% block title %}Shape-Fit Einstellungen{% endblock %}
+{% block nav_settings %}active{% endblock %}
+{% block page_title %}Shape-Fit Einstellungen{% endblock %}
+{% block page_sub %}Parameter für die automatische SMPL-X Shape-Berechnung{% endblock %}
+
+{% block content %}
+<div style="max-width:520px">
+  <div class="card">
+    <div class="card-header">Sampling</div>
+    <div class="card-body">
+      <form method="post">
+        {% csrf_token %}
+
+        <div class="form-group">
+          <label>Frames pro Clip</label>
+          <input type="number" name="frames_per_clip" value="{{ cfg.frames_per_clip }}" min="1" max="100">
+          <div class="form-hint">Wie viele Frames aus jedem Clip für den Fit gesampelt werden.</div>
+        </div>
+
+        <div class="form-group">
+          <label>Frame-Abstand (Stride)</label>
+          <input type="number" name="frame_stride" value="{{ cfg.frame_stride }}" min="1" max="300">
+          <div class="form-hint">Abstand zwischen zwei gesampelten Frames in Frames (nicht Sekunden).</div>
+        </div>
+
+        <div class="card-header" style="margin:20px -20px 12px;padding-left:20px">Optimierung</div>
+
+        <div class="form-group">
+          <label>Phase-1 Epochen <span class="text-muted text-sm">(Shape + Orient + Transl)</span></label>
+          <input type="number" name="n_phase1_epochs" value="{{ cfg.n_phase1_epochs }}" min="10" max="5000">
+        </div>
+
+        <div class="form-group">
+          <label>Phase-2 Epochen <span class="text-muted text-sm">(alle Parameter inkl. Pose)</span></label>
+          <input type="number" name="n_phase2_epochs" value="{{ cfg.n_phase2_epochs }}" min="10" max="5000">
+        </div>
+
+        <div class="flex gap-8 mt-16">
+          <button type="submit" class="btn btn-primary">Speichern</button>
+          <a href="javascript:history.back()" class="btn btn-ghost">Zurück</a>
+        </div>
+      </form>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:16px">
+    <div class="card-header">Info</div>
+    <div class="card-body text-sm text-muted" style="line-height:1.6">
+      <p>Pro Clip werden <strong>{{ cfg.frames_per_clip }}</strong> Frames mit je <strong>{{ cfg.frame_stride }}</strong> Frames Abstand gesampelt,
+      zentriert im Clip.  Die Keypoints werden einmalig berechnet und danach gecacht.</p>
+      <p>Gesamtdauer grob: <em>n_clips × frames_per_clip × Pose-Worker-Latenz</em> (Extraktion) +
+      <em>(Phase-1 + Phase-2) × batch_size / GPU-Speed</em> (Fit).</p>
+    </div>
+  </div>
+</div>
+{% endblock %}

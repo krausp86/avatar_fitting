@@ -52,10 +52,11 @@ def _run_fitting(job_id, config: dict):
         )
         avatar.save()
 
-    stages = config.get('stages', ['1', '1.5', '2', '2.5', '3', '4'])
+    stages = config.get('stages', ['0', '1', '1.5', '2', '2.5', '3', '4'])
     n_stages = len(stages)
 
     STAGE_NAMES = {
+        '0':   'Shape Fit',
         '1':   'SMPL-X Fitting',
         '1.5': 'Face Refinement',
         '2':   'Static Offsets',
@@ -76,17 +77,23 @@ def _run_fitting(job_id, config: dict):
                 epoch        = payload.get('epoch', 0)
                 total_epochs = payload.get('total_epochs', 1)
                 job.progress = (_s_idx + epoch / max(total_epochs, 1)) / n_stages
-                job.log.append({
+                entry = {
                     'stage': stage,
                     'epoch': epoch,
                     'loss':  payload.get('loss', 0),
-                })
+                }
+                if payload.get('note'):
+                    entry['note'] = payload['note']
+                job.log.append(entry)
                 job.save()
                 payload['person_id'] = str(avatar.id)
                 _send_progress(job_id, payload)
 
             # ── Dispatch to stage implementation ──────────────────────────
-            if stage == '1':
+            if stage == '0':
+                _run_stage0(avatar, config, _progress_cb)
+
+            elif stage == '1':
                 _run_stage1(avatar, config, _progress_cb)
 
             elif stage == '1.5':
@@ -144,12 +151,65 @@ def _run_fitting(job_id, config: dict):
 
 # ── Stage implementations ──────────────────────────────────────────────────────
 
+def _run_stage0(avatar, config: dict, progress_cb) -> None:
+    """
+    Stage 0: Fit SMPL-X shape (beta) across all clips of the PersonGroup.
+    Result is stored in PersonShape and used by Stage 1 as a fixed initialisation.
+    """
+    from .models import PersonShape, PersonGroup
+    from .shape_tasks import _run_shape_job
+
+    if not avatar.group_id:
+        log.warning("Stage 0: avatar has no group – shape fit skipped")
+        progress_cb({'type': 'progress', 'epoch': 1, 'total_epochs': 1, 'loss': 0})
+        return
+
+    group = PersonGroup.objects.get(pk=avatar.group_id)
+    shape, _ = PersonShape.objects.get_or_create(group=group)
+    shape.betas       = []
+    shape.log         = []
+    shape.fit_quality = {}
+    shape.render_b64  = ''
+    shape.error       = ''
+    shape.fitted_at   = None
+    shape.status      = PersonShape.Status.RUNNING
+    shape.save()
+
+    # Run synchronously in this thread (shape_tasks handles its own DB updates)
+    _run_shape_job(str(shape.id))
+
+    shape.refresh_from_db()
+    if shape.status != PersonShape.Status.DONE:
+        raise RuntimeError(f"Shape-Fit fehlgeschlagen: {shape.error}")
+
+    log.info("Stage 0 complete: kp_loss=%.4f  focal=%.3f",
+             shape.fit_quality.get('kp_loss', 0),
+             shape.focal_scale)
+    progress_cb({'type': 'progress', 'epoch': 1, 'total_epochs': 1,
+                 'loss': shape.fit_quality.get('kp_loss', 0)})
+
+
 def _run_stage1(avatar, config: dict, progress_cb) -> None:
+    # Free the shape_fit SMPL-X model (Stage 0 residual) before loading
+    # stage1's model – both are ~300-700 MB and must not coexist in RAM.
+    from .fitting import shape_fit as _sf
+    _sf._smplx_cache.clear()
+
     from .fitting.stage1 import run_stage1, save_stage1_result, generate_stage1_previews
-    result = run_stage1(avatar, config, progress_cb=progress_cb)
-    save_stage1_result(result, avatar.data_path)
-    generate_stage1_previews(result, avatar, avatar.data_path)
-    log.info("Stage 1 complete for avatar %s", avatar.id)
+    from .fitting import stage1 as _s1
+    from .fitting.pose_smoothing import store_and_smooth_poses
+    try:
+        result = run_stage1(avatar, config, progress_cb=progress_cb)
+        save_stage1_result(result, avatar.data_path)
+        try:
+            store_and_smooth_poses(avatar, result)
+        except Exception:
+            log.exception("Pose smoothing failed for avatar %s — continuing without", avatar.id)
+        generate_stage1_previews(result, avatar, avatar.data_path)
+        log.info("Stage 1 complete for avatar %s", avatar.id)
+    finally:
+        # Release stage1 model after save+previews are done
+        _s1._smplx_cache.clear()
 
 
 def _run_stage2(avatar, config: dict, progress_cb) -> None:

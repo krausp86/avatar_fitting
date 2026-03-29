@@ -6,6 +6,7 @@ Endpoints:
 """
 import base64
 import logging
+import time
 
 import cv2
 import numpy as np
@@ -101,6 +102,10 @@ def analyze(req: AnalyzeRequest):
                 result["segmentation_b64"] = _encode_frame(
                     _render_segmentation(frame, mask)
                 )
+                # Raw binary mask as lossless PNG (JPEG would corrupt the binary data)
+                mask_u8 = (mask > 0.5).astype(np.uint8) * 255
+                _, buf = cv2.imencode('.png', mask_u8)
+                result["mask_b64"] = base64.b64encode(buf).decode()
 
         return result
 
@@ -121,8 +126,12 @@ def analyze_combined(req: CombinedRequest):
         raise HTTPException(400, f"Frame decode error: {e}")
 
     try:
+        log.info("analyze_combined: frame %dx%d", frame.shape[1], frame.shape[0])
+        t0 = time.perf_counter()
         vit_lm = ViTPoseBackend.detect(frame)
         rtm_lm = RTMPoseBackend.detect(frame)
+        log.info("analyze_combined: done in %.0f ms  (vit=%d rtm=%d landmarks)",
+                 (time.perf_counter() - t0) * 1000, len(vit_lm), len(rtm_lm))
 
         body_lm  = [lm for lm in vit_lm if lm['idx'] <= 16]
         face_lm  = [lm for lm in rtm_lm if 23 <= lm['idx'] <= 90]

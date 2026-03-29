@@ -1,6 +1,17 @@
 import os
 import json
+import functools
 from pathlib import Path
+import numpy as np
+
+# Module-level progress store for single-frame SMPL-X fitting (keyed by fit_id).
+# Entries are created by the fit view and polled by video_debug_smplx_progress.
+_smplx_fit_progress: dict = {}
+
+# Module-level pose-param cache for temporal smoothing in pose debug.
+# Key: (video_pk_str, frame_idx_int) → pose_params dict (source, theta/body_pose, etc.)
+_debug_pose_cache: dict = {}
+
 from django.shortcuts import render, get_object_or_404, redirect, aget_object_or_404
 from django.http import JsonResponse
 from django.views.decorators.http import require_POST
@@ -229,6 +240,344 @@ async def video_debug_frame_combined(request, pk):
         return JsonResponse({'error': str(exc)}, status=500)
 
 
+async def video_debug_frame_smplx(request, pk):
+    """
+    Fit SMPL-X to ViTPose keypoints for a single debug frame and return
+    a rendered mesh overlay image.
+
+    GET params:
+        frame  – frame index (required)
+        fx, fy, cx, cy – camera intrinsics in pixels (optional; estimated if absent)
+    """
+    import asyncio
+    from .detection.backends import async_combined_analyze, RTMPoseBackend, ViTPoseBackend, MediaPipeBackend
+    from .fitting.single_frame_fit import fit_and_render
+
+    video = await aget_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    frame_param = request.GET.get('frame')
+    if frame_param is None:
+        return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
+
+    frame, frame_idx, _, _ = await asyncio.to_thread(
+        _read_video_frame, video.path, frame_param)
+
+    H, W = frame.shape[:2]
+
+    # Camera intrinsics from query params or auto-estimate
+    try:
+        fx = float(request.GET['fx'])
+        fy = float(request.GET['fy'])
+        cx = float(request.GET['cx'])
+        cy = float(request.GET['cy'])
+        intrinsics = {'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy}
+    except (KeyError, ValueError):
+        f = max(W, H) * 1.2
+        intrinsics = {'fx': f, 'fy': f, 'cx': W / 2.0, 'cy': H / 2.0}
+
+    if not (RTMPoseBackend.available and ViTPoseBackend.available):
+        return JsonResponse({'error': 'RTMPose und/oder ViTPose nicht verfügbar – '
+                                      'Pose-Worker läuft nicht?'}, status=503)
+
+    # Get combined landmarks + MediaPipe segmentation mask in parallel
+    try:
+        data, mp_data = await asyncio.gather(
+            async_combined_analyze(frame),
+            MediaPipeBackend.async_analyze(frame, include_segmentation=True),
+            return_exceptions=True,
+        )
+        if isinstance(data, Exception):
+            raise data
+        if isinstance(mp_data, Exception):
+            log.warning("video_debug_frame_smplx: mediapipe segmentation failed: %s", mp_data)
+            mp_data = {}
+    except Exception as exc:
+        log.exception("video_debug_frame_smplx: combined_analyze failed video=%s frame=%s", pk, frame_param)
+        return JsonResponse({'error': str(exc)}, status=500)
+
+    body_landmarks = data.get('body_landmarks', [])
+    if not body_landmarks:
+        return JsonResponse({'error': 'Keine Körper-Landmarks gefunden (ViTPose)'}, status=422)
+
+    seg_mask = mp_data.get('mask') if isinstance(mp_data, dict) else None
+
+    # Use pre-fitted PersonShape betas + focal_scale if available.
+    fixed_betas = None
+    try:
+        from .models import PersonShape
+        from asgiref.sync import sync_to_async
+        shape = await sync_to_async(
+            lambda: PersonShape.objects.filter(
+                group__persons__video=video, status='done',
+            ).exclude(betas=[]).first()
+        )()
+        if shape:
+            fixed_betas = shape.betas
+            # Apply the same 1.2-base as shape_fit so focal lengths are consistent.
+            if shape.focal_scale and shape.focal_scale != 1.0:
+                f_ps = max(W, H) * 1.2 * float(shape.focal_scale)
+                intrinsics = {'fx': f_ps, 'fy': f_ps, 'cx': W / 2.0, 'cy': H / 2.0}
+                log.info("video_debug_frame_smplx: PersonShape focal=%.1f px (scale=%.3f)",
+                         f_ps, shape.focal_scale)
+            log.info("video_debug_frame_smplx: using PersonShape betas (group %s)", shape.group_id)
+    except Exception:
+        pass
+
+    n_orient_epochs = int(request.GET.get('n_orient_epochs', 600))
+    n_pose_epochs   = int(request.GET.get('n_pose_epochs',   900))
+
+    from .fitting.romp_render import romp_infer_params
+    from django.conf import settings as _settings
+
+    # ── ROMP als Orientierungs-Init für den SMPL-X Optimizer ──────────────────
+    romp_raw = await asyncio.to_thread(
+        romp_infer_params, frame,
+        getattr(_settings, 'ROMP_MODEL_PATH', None),
+        getattr(_settings, 'ROMP_SMPL_PATH',  None),
+    )
+    romp_init_smplx = None
+    if romp_raw is not None:
+        romp_init_smplx = {'thetas': [romp_raw['theta']], 'beta': romp_raw['beta']}
+        log.info("video_debug_frame_smplx: ROMP orient als Init verfügbar")
+    else:
+        log.info("video_debug_frame_smplx: ROMP nicht verfügbar — PnP+Winding als Fallback")
+
+    # ── SMPL-X Gradient-Optimizer ─────────────────────────────────────────────
+    fit_id = request.GET.get('fit_id', '')
+    if fit_id:
+        _smplx_fit_progress[fit_id] = {'status': 'starting', 'epoch_all': 0,
+                                        'total_all': n_orient_epochs + n_pose_epochs}
+
+    def progress_cb(info):
+        if fit_id:
+            _smplx_fit_progress[fit_id] = {'status': 'running', **info}
+
+    try:
+        rendered_bgr, quality = await asyncio.to_thread(
+            functools.partial(fit_and_render, frame, body_landmarks, intrinsics,
+                              seg_mask=seg_mask, fixed_betas=fixed_betas,
+                              romp_init=romp_init_smplx,
+                              n_orient_epochs=n_orient_epochs,
+                              n_pose_epochs=n_pose_epochs,
+                              progress_cb=progress_cb))
+    except Exception as exc:
+        if fit_id:
+            _smplx_fit_progress.pop(fit_id, None)
+        log.exception("video_debug_frame_smplx: fit_and_render failed video=%s frame=%s", pk, frame_param)
+        return JsonResponse({'error': str(exc)}, status=500)
+
+    if fit_id:
+        _smplx_fit_progress.pop(fit_id, None)
+
+    _debug_pose_cache[(str(pk), frame_idx)] = quality.pop('pose_params', None)
+    phase_renders = [
+        {'label': label, 'img': _frame_to_b64(img)}
+        for label, img in quality.pop('phase_renders', [])
+    ]
+    return JsonResponse({
+        'frame_idx':     frame_idx,
+        'render':        _frame_to_b64(rendered_bgr),
+        'quality':       quality,
+        'intrinsics':    intrinsics,
+        'phase_renders': phase_renders,
+        'romp':          None,
+    })
+
+
+async def video_debug_smplx_progress(request, pk):
+    """Return current SMPL-X fitting progress for a given fit_id."""
+    fit_id = request.GET.get('fit_id', '')
+    progress = _smplx_fit_progress.get(fit_id)
+    if progress is None:
+        return JsonResponse({'status': 'unknown'})
+    return JsonResponse(progress)
+
+
+async def video_debug_frame_smplx_smooth(request, pk):
+    """
+    Fit target frame + last N past frames, apply Savitzky-Golay, return smoothed render.
+
+    GET params:
+        frame      – target frame index (required)
+        n_past     – number of past frames to include (default 5)
+        k_stride   – frame stride between history frames (default 3)
+        sg_window  – Savitzky-Golay window length, must be odd (default 11)
+        sg_poly    – polynomial order (default 3)
+        fx,fy,cx,cy – camera intrinsics (optional)
+    """
+    import asyncio, functools
+    from scipy.signal import savgol_filter
+    from .detection.backends import async_combined_analyze, RTMPoseBackend, ViTPoseBackend, MediaPipeBackend
+    from .fitting.single_frame_fit import fit_and_render, render_smplx_from_params
+    from .fitting.romp_render import romp_infer_params, render_romp_from_params
+    from django.conf import settings as _settings
+
+    video = await aget_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    frame_param = request.GET.get('frame')
+    if frame_param is None:
+        return JsonResponse({'error': 'frame parameter fehlt'}, status=400)
+
+    n_past    = int(request.GET.get('n_past',    5))
+    k_stride  = int(request.GET.get('k_stride',  3))
+    sg_window = int(request.GET.get('sg_window', 11))
+    sg_poly   = int(request.GET.get('sg_poly',   3))
+
+    target_frame, target_idx, _, _ = await asyncio.to_thread(
+        _read_video_frame, video.path, frame_param)
+    H, W = target_frame.shape[:2]
+
+    try:
+        fx = float(request.GET['fx'])
+        fy = float(request.GET['fy'])
+        cx = float(request.GET['cx'])
+        cy = float(request.GET['cy'])
+        intrinsics = {'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy}
+    except (KeyError, ValueError):
+        f = max(W, H) * 1.2
+        intrinsics = {'fx': f, 'fy': f, 'cx': W / 2.0, 'cy': H / 2.0}
+
+    # Fixed betas from PersonShape if available
+    fixed_betas = None
+    try:
+        from .models import PersonShape
+        from asgiref.sync import sync_to_async
+        shape = await sync_to_async(
+            lambda: PersonShape.objects.filter(
+                group__persons__video=video, status='done',
+            ).exclude(betas=[]).first()
+        )()
+        if shape:
+            fixed_betas = shape.betas
+            if shape.focal_scale and shape.focal_scale != 1.0:
+                f_ps = max(W, H) * 1.2 * float(shape.focal_scale)
+                intrinsics = {'fx': f_ps, 'fy': f_ps, 'cx': W / 2.0, 'cy': H / 2.0}
+    except Exception:
+        pass
+
+    romp_model_path = getattr(_settings, 'ROMP_MODEL_PATH', None)
+    romp_smpl_path  = getattr(_settings, 'ROMP_SMPL_PATH',  None)
+
+    # Build frame list: [target - n_past*k_stride, ..., target - k_stride, target]
+    frame_indices = [max(0, target_idx - (n_past - i) * k_stride) for i in range(n_past)] + [target_idx]
+    # Deduplicate while preserving order (can happen when target_idx is near 0)
+    seen = set()
+    frame_indices = [fi for fi in frame_indices if not (fi in seen or seen.add(fi))]
+
+    async def _get_params(fi):
+        """Return pose_params for frame fi — from cache or freshly fitted."""
+        cache_key = (str(pk), fi)
+        if cache_key in _debug_pose_cache and _debug_pose_cache[cache_key] is not None:
+            return _debug_pose_cache[cache_key]
+
+        frm, _, _, _ = await asyncio.to_thread(_read_video_frame, video.path, str(fi))
+
+        # ROMP als Orient-Init holen (auch wenn SMPL-X Optimizer läuft)
+        romp_raw = await asyncio.to_thread(
+            romp_infer_params, frm, romp_model_path, romp_smpl_path)
+        romp_init_smplx = None
+        if romp_raw is not None:
+            romp_init_smplx = {'thetas': [romp_raw['theta']], 'beta': romp_raw['beta']}
+
+        # SMPL-X Optimizer — mit ROMP als Init wenn verfügbar
+        is_target = (fi == target_idx)
+        n_orient = int(request.GET.get('n_orient_epochs', 600)) if is_target else 200
+        n_pose   = int(request.GET.get('n_pose_epochs',   900)) if is_target else 300
+
+        if not (RTMPoseBackend.available and ViTPoseBackend.available):
+            return None
+        try:
+            data = await async_combined_analyze(frm)
+        except Exception:
+            return None
+        body_landmarks = data.get('body_landmarks', [])
+        if not body_landmarks:
+            return None
+        try:
+            _, quality = await asyncio.to_thread(
+                functools.partial(fit_and_render, frm, body_landmarks, intrinsics,
+                                  fixed_betas=fixed_betas, romp_init=romp_init_smplx,
+                                  n_orient_epochs=n_orient, n_pose_epochs=n_pose))
+            params = quality.get('pose_params')
+            _debug_pose_cache[cache_key] = params
+            return params
+        except Exception:
+            log.exception("smooth: fit_and_render failed for frame %d", fi)
+            return None
+
+    # Collect params for all frames (sequentially to avoid GPU contention)
+    all_params = []
+    for fi in frame_indices:
+        p = await _get_params(fi)
+        all_params.append(p)
+
+    # Filter out None entries (failed frames)
+    valid = [(fi, p) for fi, p in zip(frame_indices, all_params) if p is not None]
+    if not valid:
+        return JsonResponse({'error': 'Kein einziger Frame konnte gefittet werden'}, status=422)
+
+    valid_indices, valid_params = zip(*valid)
+    source = valid_params[0]['source']
+
+    # Stack parameters for SG smoothing
+    if source == 'romp':
+        theta_arr = np.array([p['theta'] for p in valid_params], dtype=np.float32)  # (N, 72)
+        cam_arr   = np.array([p['cam']   for p in valid_params], dtype=np.float32)  # (N, 3)
+    else:
+        bp_arr     = np.array([p['body_pose']     for p in valid_params], dtype=np.float32)  # (N, 63)
+        orient_arr = np.array([p['global_orient'] for p in valid_params], dtype=np.float32)  # (N, 3)
+        transl_arr = np.array([p['transl']        for p in valid_params], dtype=np.float32)  # (N, 3)
+
+    N = len(valid_params)
+    w = sg_window if N >= sg_window else (N if N % 2 == 1 else max(N - 1, 1))
+    if w < sg_poly + 1:
+        w = sg_poly + 1 if (sg_poly + 1) % 2 == 1 else sg_poly + 2
+
+    def _sg(arr):
+        return savgol_filter(arr, window_length=w, polyorder=min(sg_poly, w - 1), axis=0)
+
+    # Smoothed params for the target frame (last valid entry closest to target)
+    target_smooth_idx = next(
+        (i for i, fi in reversed(list(enumerate(valid_indices))) if fi == target_idx),
+        len(valid_params) - 1,
+    )
+
+    if source == 'romp':
+        smooth_theta = _sg(theta_arr)[target_smooth_idx]
+        smooth_cam   = _sg(cam_arr)[target_smooth_idx]
+        smoothed_params = {**valid_params[target_smooth_idx],
+                           'theta': smooth_theta.tolist(),
+                           'cam':   smooth_cam.tolist()}
+        rendered_bgr = await asyncio.to_thread(render_romp_from_params, target_frame, smoothed_params)
+    else:
+        tp = valid_params[target_smooth_idx]
+        smoothed_params = {
+            'body_pose':     _sg(bp_arr)[target_smooth_idx].tolist(),
+            'global_orient': _sg(orient_arr)[target_smooth_idx].tolist(),
+            'transl':        _sg(transl_arr)[target_smooth_idx].tolist(),
+            'betas':         tp['betas'],
+            'kp_px':         tp['kp_px'],
+            'fx': tp['fx'], 'fy': tp['fy'], 'cx': tp['cx'], 'cy': tp['cy'],
+        }
+        rendered_bgr = await asyncio.to_thread(
+            render_smplx_from_params, target_frame, **smoothed_params)
+
+    if rendered_bgr is None:
+        return JsonResponse({'error': 'Rendering mit geglätteten Parametern fehlgeschlagen'}, status=500)
+
+    return JsonResponse({
+        'frame_idx':    target_idx,
+        'render':       _frame_to_b64(rendered_bgr),
+        'n_frames_used': N,
+        'sg_window':    w,
+        'source':       source,
+    })
+
+
 async def video_debug_backends(request, pk):
     """List all backends and their availability (proxied from pose-worker)."""
     from .detection.backends import ALL_BACKENDS, async_refresh_availability
@@ -329,13 +678,15 @@ def merge_persons(request):
 
 
 def group_detail(request, pk):
+    from .models import PersonShape
     group        = get_object_or_404(PersonGroup, pk=pk)
     persons      = group.persons.select_related('video').all()
     avatars      = Avatar.objects.filter(group=group).order_by('name', '-version')
     other_groups = PersonGroup.objects.exclude(pk=pk).order_by('-updated_at')
+    shape = getattr(group, 'shape', None)
     return render(request, 'core/group_detail.html', {
         'group': group, 'persons': persons, 'avatars': avatars,
-        'other_groups': other_groups,
+        'other_groups': other_groups, 'shape': shape,
     })
 
 
@@ -355,6 +706,71 @@ def unmerge_person(request, pk, person_pk):
         group.delete()
         return redirect('person_list')
     return redirect('group_detail', pk=pk)
+
+
+@require_POST
+def group_shape_fit(request, pk):
+    """Start or restart a shape fitting job for a PersonGroup."""
+    from .models import PersonGroup
+    from .shape_tasks import start_shape_fit_job
+    group = get_object_or_404(PersonGroup, pk=pk)
+    shape = start_shape_fit_job(group)
+    return JsonResponse({'status': shape.status, 'shape_id': str(shape.id)})
+
+
+def group_shape_progress(request, pk):
+    """Return current shape fit status and the last log entries."""
+    from .models import PersonGroup, PersonShape
+    from .shape_tasks import _latest_preview
+    group = get_object_or_404(PersonGroup, pk=pk)
+    try:
+        shape = group.shape
+    except PersonShape.DoesNotExist:
+        return JsonResponse({'status': 'none'})
+    return JsonResponse({
+        'status':      shape.status,
+        'log':         shape.log[-30:],
+        'fit_quality': shape.fit_quality,
+        'render_b64':  shape.render_b64 if shape.status == 'done' else '',
+        'error':       shape.error,
+        'preview_jpg': _latest_preview.get(str(shape.pk), ''),
+    })
+
+
+@require_POST
+def group_shape_cancel(request, pk):
+    """Cancel a running shape fit by signalling the cancel event and updating DB."""
+    from .models import PersonGroup, PersonShape
+    from .shape_tasks import _cancel_flags
+    group = get_object_or_404(PersonGroup, pk=pk)
+    try:
+        shape = group.shape
+        if shape.status == 'running':
+            # Signal the running thread to stop at the next progress callback
+            _cancel_flags.get(str(shape.pk), None) and _cancel_flags[str(shape.pk)].set()
+            shape.status = 'failed'
+            shape.error  = 'Manuell abgebrochen'
+            shape.save()
+    except PersonShape.DoesNotExist:
+        pass
+    return JsonResponse({'status': 'cancelled'})
+
+
+def settings_shape(request):
+    """GET/POST: shape fit settings page."""
+    from .models import ShapeFitSettings
+    cfg = ShapeFitSettings.get()
+    if request.method == 'POST':
+        try:
+            cfg.frames_per_clip = max(1, int(request.POST.get('frames_per_clip', cfg.frames_per_clip)))
+            cfg.frame_stride    = max(1, int(request.POST.get('frame_stride',    cfg.frame_stride)))
+            cfg.n_phase1_epochs = max(10, int(request.POST.get('n_phase1_epochs', cfg.n_phase1_epochs)))
+            cfg.n_phase2_epochs = max(10, int(request.POST.get('n_phase2_epochs', cfg.n_phase2_epochs)))
+            cfg.save()
+        except (ValueError, TypeError):
+            pass
+        return redirect('settings_shape')
+    return render(request, 'core/settings_shape.html', {'cfg': cfg})
 
 
 # ─── Avatars ─────────────────────────────────────────────────────────────────
@@ -404,6 +820,7 @@ def avatar_detail(request, pk):
     versions = Avatar.objects.filter(name=avatar.name).order_by('-version')
     edits    = avatar.edits.all()
     jobs     = avatar.jobs.order_by('-started_at')[:5]
+    latest_job = jobs[0] if jobs else None
 
     # Load fitting metadata if available
     fitting_meta = None
@@ -420,9 +837,17 @@ def avatar_detail(request, pk):
         if os.path.isdir(preview_dir):
             n_previews = len([f for f in os.listdir(preview_dir) if f.endswith('.jpg')])
 
+    # PersonShape log (Stage 0)
+    person_shape = None
+    if avatar.group_id:
+        from .models import PersonShape
+        person_shape = PersonShape.objects.filter(group_id=avatar.group_id).first()
+
     return render(request, 'core/avatar_detail.html', {
         'avatar': avatar, 'versions': versions, 'edits': edits, 'jobs': jobs,
+        'latest_job': latest_job,
         'fitting_meta': fitting_meta, 'n_previews': n_previews,
+        'person_shape': person_shape,
     })
 
 
@@ -460,14 +885,18 @@ def avatar_fit(request, pk):
     avatar = get_object_or_404(Avatar, pk=pk)
     stages = request.POST.getlist('stages') or ['1', '1.5', '2', '2.5', '3', '4']
     config = {
-        'stages':           stages,
-        'gender':           request.POST.get('gender', 'neutral'),
-        'static_threshold': float(request.POST.get('static_threshold', 0.05)),
-        'max_frames':       int(request.POST.get('max_frames', 150)),
-        'n_cage':           int(request.POST.get('n_cage', 60)),
-        'tex_res_body':     int(request.POST.get('tex_res_body', 1024)),
-        'tex_res_face':     int(request.POST.get('tex_res_face', 2048)),
-        'inpainting':       request.POST.get('inpainting', 'prior'),
+        'stages':            stages,
+        'gender':            request.POST.get('gender', 'neutral'),
+        'static_threshold':  float(request.POST.get('static_threshold', 0.05)),
+        'max_frames':        int(request.POST.get('max_frames', 150)),
+        'n_warmup_epochs':   int(request.POST.get('n_warmup_epochs', 50)),
+        'n_shape_epochs':    int(request.POST.get('n_shape_epochs', 200)),
+        'n_poseref_epochs':  int(request.POST.get('n_poseref_epochs', 100)),
+        'n_pose_epochs':     int(request.POST.get('n_pose_epochs', 300)),
+        'n_cage':            int(request.POST.get('n_cage', 60)),
+        'tex_res_body':      int(request.POST.get('tex_res_body', 1024)),
+        'tex_res_face':      int(request.POST.get('tex_res_face', 2048)),
+        'inpainting':        request.POST.get('inpainting', 'prior'),
     }
     job = start_fitting_job(avatar, config)
     return JsonResponse({'job_id': str(job.id)})
@@ -747,6 +1176,51 @@ def job_status(request, pk):
         'log':           job.log[-20:],
         'error':         job.error,
     })
+
+
+def avatar_log(request, pk):
+    """Return combined fitting log (PersonShape + FittingJob) as JSON for polling."""
+    from .models import PersonShape
+    avatar = get_object_or_404(Avatar, pk=pk)
+    lines  = []
+
+    # Shape fit log (Stage 0)
+    if avatar.group_id:
+        shape = PersonShape.objects.filter(group_id=avatar.group_id).first()
+        if shape:
+            for e in shape.log:
+                if e.get('type') == 'info':
+                    lines.append({'source': 'shape', 'ts': e.get('ts', ''),
+                                  'msg': e.get('msg', '')})
+                elif e.get('type') == 'progress':
+                    lines.append({'source': 'shape', 'ts': e.get('ts', ''),
+                                  'msg': (f"[{e.get('phase','')}] "
+                                          f"epoch {e.get('epoch_all','')}/{e.get('total_all','')} "
+                                          f"loss={e.get('loss','')}")})
+            if shape.error:
+                lines.append({'source': 'shape', 'ts': '', 'msg': f'❌ {shape.error}'})
+
+    # Latest fitting job log
+    latest = avatar.jobs.order_by('-started_at').first()
+    if latest:
+        seen_stage = None
+        for e in latest.log:
+            stage = e.get('stage', '')
+            if stage != seen_stage:
+                lines.append({'source': 'job', 'ts': '',
+                              'msg': f'── Stage {stage} ──'})
+                seen_stage = stage
+            if e.get('note'):
+                # Human-readable milestone message — show prominently
+                lines.append({'source': 'job', 'ts': '', 'msg': f'  ▶ {e["note"]}'})
+            elif e.get('loss') is not None and e.get('epoch', 0) % 50 == 0:
+                # Show every 50th epoch to avoid flooding the log
+                lines.append({'source': 'job', 'ts': '',
+                              'msg': f"  ep {e.get('epoch',''):>4}  loss={e.get('loss', 0):.5f}"})
+        if latest.error:
+            lines.append({'source': 'job', 'ts': '', 'msg': f'❌ {latest.error}'})
+
+    return JsonResponse({'lines': lines, 'avatar_status': avatar.status})
 
 
 def avatar_preview_image(request, pk, n):

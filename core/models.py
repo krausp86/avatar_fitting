@@ -141,6 +141,88 @@ class AvatarEdit(models.Model):
         return f"Edit on {self.avatar} – {self.label or self.created_at}"
 
 
+class ShapeFitSettings(models.Model):
+    """Singleton – always access via ShapeFitSettings.get()."""
+    frames_per_clip  = models.IntegerField(default=10,  help_text='Frames to sample per clip')
+    frame_stride     = models.IntegerField(default=5,   help_text='Stride between sampled frames within a clip')
+    n_phase1_epochs  = models.IntegerField(default=300, help_text='Phase 1 epochs (shape + orient + transl)')
+    n_phase2_epochs  = models.IntegerField(default=500, help_text='Phase 2 epochs (full pose)')
+
+    @classmethod
+    def get(cls):
+        obj, _ = cls.objects.get_or_create(pk=1)
+        return obj
+
+    class Meta:
+        verbose_name = 'Shape Fit Settings'
+
+
+class PersonFrameKeypoints(models.Model):
+    """Cached ViTPose + RTMPose keypoints for a single frame of a DetectedPerson track."""
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    person         = models.ForeignKey(DetectedPerson, on_delete=models.CASCADE, related_name='keypoints')
+    frame_idx      = models.IntegerField()
+    body_landmarks = models.JSONField(default=list)   # ViTPose COCO-17
+    rtm_landmarks  = models.JSONField(default=list)   # RTMPose wholebody
+    seg_mask_b64   = models.TextField(blank=True)     # PNG base64 binary segmentation mask (optional)
+    computed_at    = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('person', 'frame_idx')]
+        ordering = ['person', 'frame_idx']
+
+    def __str__(self):
+        return f"{self.person} frame {self.frame_idx}"
+
+
+class PersonFramePose(models.Model):
+    """Per-frame SMPL-X pose parameters from Stage 1 fitting, with Savitzky-Golay smoothed variants."""
+    id                   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    person               = models.ForeignKey(DetectedPerson, on_delete=models.CASCADE, related_name='frame_poses')
+    frame_idx            = models.IntegerField()
+    body_pose            = models.JSONField(default=list)   # 63 floats (axis-angle)
+    global_orient        = models.JSONField(default=list)   # 3 floats
+    transl               = models.JSONField(default=list)   # 3 floats
+    body_pose_smooth     = models.JSONField(default=list)   # Savitzky-Golay smoothed
+    global_orient_smooth = models.JSONField(default=list)
+    transl_smooth        = models.JSONField(default=list)
+    created_at           = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = [('person', 'frame_idx')]
+        ordering = ['person', 'frame_idx']
+
+    def __str__(self):
+        return f"{self.person} frame {self.frame_idx} pose"
+
+
+class PersonShape(models.Model):
+    """Fitted SMPL-X shape parameters for a PersonGroup."""
+
+    class Status(models.TextChoices):
+        PENDING = 'pending', 'Pending'
+        RUNNING = 'running', 'Running'
+        DONE    = 'done',    'Done'
+        FAILED  = 'failed',  'Failed'
+
+    id             = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    group          = models.OneToOneField(PersonGroup, on_delete=models.CASCADE, related_name='shape')
+    betas          = models.JSONField(default=list)        # 10 floats
+    hip_correction = models.FloatField(default=1.0)        # learned hip-landmark → hip-joint offset correction
+    focal_scale    = models.FloatField(default=1.0)        # learned intrinsics scale factor
+    status         = models.CharField(max_length=16, choices=Status.choices, default=Status.PENDING)
+    log            = models.JSONField(default=list)        # progress/info entries (truncated to last 300)
+    fit_quality    = models.JSONField(default=dict)        # {kp_loss, n_frames, n_clips}
+    render_b64     = models.TextField(blank=True)          # T-pose preview JPEG as data URI
+    error          = models.TextField(blank=True)
+    fitted_at      = models.DateTimeField(null=True, blank=True)
+    created_at     = models.DateTimeField(auto_now_add=True)
+    updated_at     = models.DateTimeField(auto_now=True)
+
+    def __str__(self):
+        return f"Shape for {self.group} [{self.status}]"
+
+
 class FittingJob(models.Model):
     """A running or completed fitting job."""
 

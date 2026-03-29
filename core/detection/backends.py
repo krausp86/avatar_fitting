@@ -34,6 +34,14 @@ def _decode_image(b64: str) -> np.ndarray:
     return cv2.imdecode(arr, cv2.IMREAD_COLOR)
 
 
+def _decode_mask(b64: str) -> np.ndarray:
+    """Decode a lossless PNG binary mask (uint8 0/255) to float32 [0,1]."""
+    data = base64.b64decode(b64)
+    arr = np.frombuffer(data, np.uint8)
+    mask = cv2.imdecode(arr, cv2.IMREAD_GRAYSCALE)
+    return (mask > 127).astype(np.float32)
+
+
 def _fetch_backends() -> List[Dict]:
     """Fetch backend list from pose-worker. Returns [] on error."""
     try:
@@ -84,16 +92,31 @@ class PoseBackend:
             "include_render": True,
             "include_segmentation": include_segmentation,
         }
-        async with httpx.AsyncClient(timeout=3600.0) as client:
-            resp = await client.post(f"{POSE_WORKER_URL}/analyze", json=payload)
-        resp.raise_for_status()
+        log.debug("%s.async_analyze: POST %s/analyze", cls.backend_id, POSE_WORKER_URL)
+        try:
+            async with httpx.AsyncClient(timeout=3600.0) as client:
+                resp = await client.post(f"{POSE_WORKER_URL}/analyze", json=payload)
+            log.debug("%s.async_analyze: status=%d", cls.backend_id, resp.status_code)
+            resp.raise_for_status()
+        except httpx.ConnectError as e:
+            log.error("%s.async_analyze: cannot connect to pose-worker – %s", cls.backend_id, e)
+            raise
+        except httpx.HTTPStatusError as e:
+            log.error("%s.async_analyze: HTTP %d – %s", cls.backend_id, e.response.status_code, e.response.text[:300])
+            raise
+        except Exception as e:
+            log.error("%s.async_analyze: %s: %s", cls.backend_id, type(e).__name__, e)
+            raise
         data = resp.json()
+        log.debug("%s.async_analyze: detection=%s landmark_count=%d",
+                  cls.backend_id, data.get("detection"), data.get("landmark_count", 0))
         return {
             "landmarks":      data.get("landmarks", []),
             "detection":      data.get("detection", False),
             "landmark_count": data.get("landmark_count", 0),
             "render":         _decode_image(data["render_b64"]) if data.get("render_b64") else frame_bgr,
             "segmentation":   _decode_image(data["segmentation_b64"]) if data.get("segmentation_b64") else None,
+            "mask":           _decode_mask(data["mask_b64"]) if data.get("mask_b64") else None,
         }
 
     @classmethod
@@ -129,6 +152,8 @@ def refresh_availability():
     info = {b['id']: b['available'] for b in _BACKENDS_CACHE}
     for backend_cls in ALL_BACKENDS:
         backend_cls.available = info.get(backend_cls.backend_id, False)
+    log.info("Backend availability: %s",
+             {b.backend_id: b.available for b in ALL_BACKENDS})
 
 
 async def async_refresh_availability():
@@ -146,6 +171,8 @@ async def async_refresh_availability():
     info = {b['id']: b['available'] for b in _BACKENDS_CACHE}
     for backend_cls in ALL_BACKENDS:
         backend_cls.available = info.get(backend_cls.backend_id, False)
+    log.info("Backend availability (async refresh): %s",
+             {b.backend_id: b.available for b in ALL_BACKENDS})
 
 
 def combined_analyze(frame_bgr) -> dict:
@@ -173,10 +200,25 @@ async def async_combined_analyze(frame_bgr) -> dict:
     """Async version – doesn't block the event loop while waiting for pose-worker."""
     import httpx
     payload = {"frame_b64": _encode_frame(frame_bgr)}
-    async with httpx.AsyncClient(timeout=3600.0) as client:
-        resp = await client.post(f"{POSE_WORKER_URL}/analyze/combined", json=payload)
-    resp.raise_for_status()
+    log.debug("async_combined_analyze: POST %s/analyze/combined (frame %dx%d)",
+              POSE_WORKER_URL, frame_bgr.shape[1], frame_bgr.shape[0])
+    try:
+        async with httpx.AsyncClient(timeout=3600.0) as client:
+            resp = await client.post(f"{POSE_WORKER_URL}/analyze/combined", json=payload)
+        log.debug("async_combined_analyze: status=%d", resp.status_code)
+        resp.raise_for_status()
+    except httpx.ConnectError as e:
+        log.error("async_combined_analyze: cannot connect to pose-worker at %s – %s", POSE_WORKER_URL, e)
+        raise
+    except httpx.HTTPStatusError as e:
+        log.error("async_combined_analyze: HTTP %d from pose-worker: %s", e.response.status_code, e.response.text[:300])
+        raise
+    except Exception as e:
+        log.error("async_combined_analyze: unexpected error – %s: %s", type(e).__name__, e)
+        raise
     data = resp.json()
+    log.debug("async_combined_analyze: detection=%s body_count=%d",
+              data.get("detection"), data.get("body_count", 0))
     return {
         "detection":       data.get("detection", False),
         "body_count":      data.get("body_count", 0),

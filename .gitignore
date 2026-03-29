@@ -196,6 +196,7 @@ models/deca/*.tar
 models/deca/*.pkl
 models/deca/*.pt
 models/deca/*.pth
+models/*
 
 # Ruff stuff:
 .ruff_cache/

@@ -23,8 +23,10 @@ services:
       - HOME=/tmp
       - PYOPENGL_PLATFORM=egl
       - DISPLAY=
+      - MIM_HOME=/data/models
+      - TORCH_HOME=/data/models
     volumes:
-      - ${MODELS_DIR:-./models}:/data/models:ro
+      - ${MODELS_DIR:-./models}:/data/models
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
       interval: 10s
@@ -55,9 +57,12 @@ services:
       - VIDEO_SCAN_ROOT=/data/videos
       - MEDIA_ROOT=/data/media
       - SMPLX_MODEL_DIR=/data/models
+      - VPOSER_MODEL_DIR=/data/models/V02_05
       - DATABASE_URL=/data/db/db.sqlite3
       - MEDIAPIPE_DISABLE_GPU=1
       - POSE_WORKER_URL=http://pose-worker:8001
+      - ROMP_MODEL_PATH=/data/models/ROMP/ROMP_V2.pkl
+      - ROMP_SMPL_PATH=/data/models/ROMP/SMPL_NEUTRAL.pth
       - TZ=Europe/Vienna
       - HOME=/tmp
       - PYOPENGL_PLATFORM=egl

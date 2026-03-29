@@ -14,6 +14,9 @@ urlpatterns = [
     path('videos/<uuid:pk>/debug/frame/', views.video_debug_frame, name='video_debug_frame'),
     path('videos/<uuid:pk>/debug/frame/backend/', views.video_debug_frame_backend, name='video_debug_frame_backend'),
     path('videos/<uuid:pk>/debug/frame/combined/', views.video_debug_frame_combined, name='video_debug_frame_combined'),
+    path('videos/<uuid:pk>/debug/frame/smplx/', views.video_debug_frame_smplx, name='video_debug_frame_smplx'),
+    path('videos/<uuid:pk>/debug/frame/smplx/progress/', views.video_debug_smplx_progress, name='video_debug_smplx_progress'),
+    path('videos/<uuid:pk>/debug/frame/smplx/smooth/', views.video_debug_frame_smplx_smooth, name='video_debug_frame_smplx_smooth'),
     path('videos/<uuid:pk>/debug/backends/', views.video_debug_backends, name='video_debug_backends'),
 
     # Person groups
@@ -41,9 +44,16 @@ urlpatterns = [
     path('videos/<uuid:pk>/stream/', views.video_stream, name='video_stream'),
     path('videos/<uuid:pk>/delete/', views.video_delete, name='video_delete'),
     path('api/job/<uuid:pk>/status/', views.job_status, name='job_status'),
+    path('api/avatar/<uuid:pk>/log/', views.avatar_log, name='avatar_log'),
     path('api/avatar/<uuid:pk>/export/', views.avatar_export, name='avatar_export'),
     path('api/avatar/<uuid:pk>/versions/', views.avatar_versions, name='avatar_versions'),
     path('avatars/<uuid:pk>/previews/<int:n>/', views.avatar_preview_image, name='avatar_preview_image'),
     path('persons/group/<uuid:pk>/rename/', views.group_rename, name='group_rename'),
     path('persons/group/<uuid:pk>/merge/', views.group_merge, name='group_merge'),
+    path('persons/group/<uuid:pk>/shape/fit/', views.group_shape_fit, name='group_shape_fit'),
+    path('persons/group/<uuid:pk>/shape/progress/', views.group_shape_progress, name='group_shape_progress'),
+    path('persons/group/<uuid:pk>/shape/cancel/', views.group_shape_cancel, name='group_shape_cancel'),
+
+    # Settings
+    path('settings/shape/', views.settings_shape, name='settings_shape'),
 ]

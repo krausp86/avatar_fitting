@@ -75,7 +75,11 @@ VIDEO_SCAN_ROOT  = os.environ.get('VIDEO_SCAN_ROOT',  str(BASE_DIR / 'video_data
 #   smplx/SMPLX_NEUTRAL.npz   (and SMPLX_MALE.npz, SMPLX_FEMALE.npz)
 #   deca/                      (DECA/FLAME weights – see /opt/deca in Docker)
 #   realesrgan/                (auto-downloaded on first use)
-SMPLX_MODEL_DIR = os.environ.get('SMPLX_MODEL_DIR', str(BASE_DIR / 'models'))
+#   vposer_v02_05/             (VPoser pose prior – optional, improves shape fit)
+SMPLX_MODEL_DIR   = os.environ.get('SMPLX_MODEL_DIR',   str(BASE_DIR / 'models'))
+VPOSER_MODEL_DIR  = os.environ.get('VPOSER_MODEL_DIR',  str(BASE_DIR / 'models/V02_05'))
+ROMP_MODEL_PATH   = os.environ.get('ROMP_MODEL_PATH',   str(BASE_DIR / 'models/ROMP/ROMP_V2.pkl'))
+ROMP_SMPL_PATH    = os.environ.get('ROMP_SMPL_PATH',    str(BASE_DIR / 'models/ROMP/SMPL_NEUTRAL.pth'))
 
 # Channels – Redis in production, InMemory for local dev
 REDIS_URL = os.environ.get('REDIS_URL', '')

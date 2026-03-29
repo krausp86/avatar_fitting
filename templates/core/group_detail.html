@@ -69,6 +69,61 @@
       </div>
     </div>
 
+    <!-- SMPL-X Shape card -->
+    <div class="card" id="shapeCard">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <span>SMPL-X Shape</span>
+        <div class="flex gap-8">
+          <form method="post" action="{% url 'group_shape_fit' group.pk %}" style="margin:0" id="shapeFitForm">
+            {% csrf_token %}
+            <button class="btn btn-primary btn-sm" id="shapeFitBtn"
+                    onclick="startShapeFit(event)"
+                    {% if shape and shape.status == 'running' %}disabled{% endif %}>
+              {% if shape and shape.status == 'running' %}⏳ Läuft…{% else %}⚙ Shape fitten{% endif %}
+            </button>
+          </form>
+          <button class="btn btn-danger btn-sm" id="shapeCancelBtn"
+                  onclick="cancelShapeFit()"
+                  style="display:{% if shape and shape.status == 'running' %}inline-flex{% else %}none{% endif %}">
+            ✕ Abbrechen
+          </button>
+        </div>
+      </div>
+      <div class="card-body" style="padding:12px">
+
+        {% if shape and shape.status == 'done' %}
+        <div style="text-align:center;margin-bottom:10px" id="shapeTposeWrap">
+          <img src="{{ shape.render_b64 }}" alt="T-Pose"
+               style="max-width:100%;border-radius:var(--r);border:1px solid var(--border)">
+        </div>
+        <div class="text-sm text-muted text-mono" style="display:flex;gap:12px;flex-wrap:wrap">
+          <span>Loss: {{ shape.fit_quality.kp_loss|floatformat:4 }}</span>
+          <span>Frames: {{ shape.fit_quality.n_frames }}</span>
+          <span>Clips: {{ shape.fit_quality.n_clips }}</span>
+          <span>focal: {{ shape.focal_scale|floatformat:3 }}</span>
+        </div>
+        {% elif shape and shape.status == 'failed' %}
+        <div class="text-sm" style="color:var(--danger)">❌ {{ shape.error|truncatechars:120 }}</div>
+        {% else %}
+        <div class="text-sm text-muted" style="text-align:center;padding:8px 0" id="shapeEmptyHint">
+          Noch kein Shape gefittet
+        </div>
+        {% endif %}
+
+        <!-- Live progress (shown while fitting) -->
+        <div id="shapeProgress" style="display:{% if shape and shape.status == 'running' %}block{% else %}none{% endif %};margin-top:10px">
+          <div style="background:var(--border);border-radius:4px;height:6px;overflow:hidden;margin-bottom:6px">
+            <div id="shapeProgressBar" style="height:100%;background:var(--primary);width:0%;transition:width .4s"></div>
+          </div>
+          <div id="shapeProgressText" class="text-sm text-muted text-mono"
+               style="white-space:pre-wrap;max-height:130px;overflow-y:auto;font-size:11px;line-height:1.4"></div>
+          <img id="shapeFitPreview" src=""
+               style="display:block;max-width:100%;margin-top:8px;border-radius:var(--r);border:1px solid var(--border);image-rendering:pixelated"
+               onerror="this.style.display='none'" onload="this.style.display='block'">
+        </div>
+      </div>
+    </div>
+
     <div class="card">
       <div class="card-header">Gruppe verwalten</div>
       <div class="card-body">
@@ -131,5 +186,119 @@
 <script>
 function openRenameModal() { document.getElementById('renameModal').style.display = 'flex'; }
 function openMergeModal()  { document.getElementById('mergeModal').style.display  = 'flex'; }
+
+const SHAPE_PROGRESS_URL = '{% url "group_shape_progress" group.pk %}';
+const SHAPE_CANCEL_URL   = '{% url "group_shape_cancel" group.pk %}';
+let _shapePollTimer = null;
+
+async function cancelShapeFit() {
+  const cancelBtn = document.getElementById('shapeCancelBtn');
+  cancelBtn.disabled = true;
+  cancelBtn.textContent = '…';
+  try {
+    const fd = new FormData();
+    fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+    await fetch(SHAPE_CANCEL_URL, {method: 'POST', body: fd});
+  } catch(e) {}
+  _stopShapePoll();
+  document.getElementById('shapeFitBtn').disabled = false;
+  document.getElementById('shapeFitBtn').textContent = '⚙ Shape fitten';
+  cancelBtn.style.display = 'none';
+  cancelBtn.disabled = false;
+  cancelBtn.textContent = '✕ Abbrechen';
+  document.getElementById('shapeProgress').style.display = 'none';
+  document.getElementById('shapeProgressText').textContent += '\nManuell abgebrochen.';
+}
+
+function startShapeFit(evt) {
+  evt.preventDefault();
+  const btn = document.getElementById('shapeFitBtn');
+  btn.disabled = true;
+  btn.textContent = '⏳ Startet…';
+  document.getElementById('shapeCancelBtn').style.display = 'inline-flex';
+  document.getElementById('shapeProgress').style.display = 'block';
+  document.getElementById('shapeProgressBar').style.width = '0%';
+  document.getElementById('shapeProgressText').textContent = '';
+  const prevImg = document.getElementById('shapeFitPreview');
+  if (prevImg) prevImg.src = '';
+  const hint = document.getElementById('shapeEmptyHint');
+  if (hint) hint.style.display = 'none';
+
+  const form = document.getElementById('shapeFitForm');
+  fetch(form.action, {method: 'POST', body: new FormData(form)})
+    .then(r => r.json())
+    .then(() => { _startShapePoll(); })
+    .catch(e => { btn.disabled = false; btn.textContent = '⚙ Shape fitten'; alert('Fehler: ' + e); });
+}
+
+function _startShapePoll() {
+  if (_shapePollTimer) return;
+  _shapePollTimer = setInterval(_pollShape, 1500);
+}
+
+function _stopShapePoll() {
+  if (_shapePollTimer) { clearInterval(_shapePollTimer); _shapePollTimer = null; }
+}
+
+async function _pollShape() {
+  try {
+    const data = await fetch(SHAPE_PROGRESS_URL).then(r => r.json());
+    const btn  = document.getElementById('shapeFitBtn');
+    const bar  = document.getElementById('shapeProgressBar');
+    const txt  = document.getElementById('shapeProgressText');
+
+    // Build progress text from last log entries
+    const lines = (data.log || []).map(e => {
+      if (e.type === 'progress') {
+        const pct = e.total_all > 0 ? Math.round(e.epoch_all / e.total_all * 100) : 0;
+        bar.style.width = pct + '%';
+        return `[${e.phase}] ${e.epoch_all}/${e.total_all}  loss=${e.loss}  focal=${e.focal_scale}`;
+      }
+      return e.msg || '';
+    });
+    if (lines.length) {
+      txt.textContent = lines.join('\n');
+      txt.scrollTop = txt.scrollHeight;
+    }
+
+    if (data.preview_jpg) {
+      let img = document.getElementById('shapeFitPreview');
+      if (img) img.src = data.preview_jpg;
+    }
+
+    if (data.status === 'done') {
+      _stopShapePoll();
+      bar.style.width = '100%';
+      btn.disabled = false;
+      btn.textContent = '⚙ Shape fitten';
+      document.getElementById('shapeCancelBtn').style.display = 'none';
+      if (data.render_b64) {
+        // Inject T-pose image without reload
+        const body = document.querySelector('#shapeCard .card-body');
+        body.insertAdjacentHTML('afterbegin',
+          `<div style="text-align:center;margin-bottom:10px">
+             <img src="${data.render_b64}" style="max-width:100%;border-radius:var(--r);border:1px solid var(--border)">
+           </div>`);
+        const q = data.fit_quality || {};
+        body.insertAdjacentHTML('afterbegin',
+          `<div class="text-sm text-muted text-mono" style="display:flex;gap:12px;flex-wrap:wrap;margin-bottom:8px">
+             <span>Loss: ${(q.kp_loss||0).toFixed(4)}</span>
+             <span>Frames: ${q.n_frames||0}</span>
+             <span>Clips: ${q.n_clips||0}</span>
+           </div>`);
+      }
+      document.getElementById('shapeProgress').style.display = 'none';
+    } else if (data.status === 'failed') {
+      _stopShapePoll();
+      btn.disabled = false;
+      btn.textContent = '⚙ Shape fitten';
+      document.getElementById('shapeCancelBtn').style.display = 'none';
+      txt.textContent += '\n❌ ' + (data.error || 'Unbekannter Fehler');
+    }
+  } catch(e) { /* network hiccup – keep polling */ }
+}
+
+// Auto-start polling if job is already running on page load
+{% if shape and shape.status == 'running' %}_startShapePoll();{% endif %}
 </script>
 {% endblock %}

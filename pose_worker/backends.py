@@ -10,6 +10,7 @@ import os
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List, Optional, Tuple
 
+import time
 import threading
 
 import cv2
@@ -32,7 +33,7 @@ from joint_definitions import (
 log = logging.getLogger(__name__)
 
 MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_heavy/float16/latest/pose_landmarker_heavy.task"
-MODEL_PATH = "/tmp/pose_landmarker_heavy.task"
+MODEL_PATH = "/data/models/pose_landmarker_heavy.task"
 
 _MODEL_CACHE: Dict[str, Any] = {}
 
@@ -40,9 +41,12 @@ _MODEL_CACHE: Dict[str, Any] = {}
 def _ensure_mediapipe_model():
     import urllib.request
     if not os.path.exists(MODEL_PATH):
-        log.info("Downloading MediaPipe pose model…")
+        os.makedirs(os.path.dirname(MODEL_PATH), exist_ok=True)
+        log.info("Downloading MediaPipe pose model → %s …", MODEL_PATH)
         urllib.request.urlretrieve(MODEL_URL, MODEL_PATH)
-        log.info("Model downloaded to %s", MODEL_PATH)
+        log.info("MediaPipe model cached at %s", MODEL_PATH)
+    else:
+        log.info("MediaPipe model found in cache: %s", MODEL_PATH)
 
 
 def _draw_skeleton(
@@ -100,9 +104,10 @@ class PoseBackend(ABC):
         if cls.backend_id not in _MODEL_CACHE:
             with _MODEL_LOAD_LOCK:
                 if cls.backend_id not in _MODEL_CACHE:  # re-check after acquiring
-                    log.info("Loading backend model: %s", cls.backend_id)
+                    log.info(">>> Loading model: %s – this may take 1-3 minutes …", cls.backend_id)
+                    t0 = time.perf_counter()
                     _MODEL_CACHE[cls.backend_id] = cls._load_model()
-                    log.info("Backend model ready: %s", cls.backend_id)
+                    log.info(">>> Model ready: %s  (%.1f s)", cls.backend_id, time.perf_counter() - t0)
         return _MODEL_CACHE[cls.backend_id]
 
     @classmethod
@@ -186,25 +191,38 @@ class MediaPipeBackend(PoseBackend):
 # ── MMPose base (shared by RTMPose + ViTPose) ─────────────────────────────────
 
 class _MMPoseBackend(PoseBackend):
-    _mmpose_model_alias: str = ''
+    _mmpose_model_alias:      str = ''
+    _mmpose_checkpoint_file:  str = ''   # filename to look for in /data/models/
     _joint_names: List[str] = []
+
+    @classmethod
+    def _find_local_checkpoint(cls) -> Optional[str]:
+        """Return path to local checkpoint if it exists in /data/models/, else None."""
+        if not cls._mmpose_checkpoint_file:
+            return None
+        path = os.path.join('/data/models', cls._mmpose_checkpoint_file)
+        if os.path.exists(path):
+            log.info("%s: using local checkpoint %s", cls.backend_id, path)
+            return path
+        log.info("%s: local checkpoint not found at %s – mim will download", cls.backend_id, path)
+        return None
 
     @classmethod
     def _load_model(cls):
         from mmpose.apis import MMPoseInferencer
-        from mmengine.registry import DefaultScope, MODELS
+        from mmengine.registry import DefaultScope
         import torch, uuid
         device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
         log.info("MMPose using device: %s", device)
-        # Fresh uuid scope → mmengine always creates a new active DefaultScope.
-        # The lock in _get_model ensures only one mmpose model loads at a time,
-        # preventing mmdet from clobbering the active scope mid-build.
+        local_ckpt = cls._find_local_checkpoint()
         scope_name = str(uuid.uuid4())
         DefaultScope.get_instance(scope_name, scope_name='mmpose')
         try:
+            if local_ckpt:
+                return MMPoseInferencer(pose2d=cls._mmpose_model_alias,
+                                        pose2d_weights=local_ckpt, device=device)
             return MMPoseInferencer(pose2d=cls._mmpose_model_alias, device=device)
         finally:
-            # Always restore mmpose scope after build (mmdet may have switched it).
             DefaultScope.get_instance(str(uuid.uuid4()), scope_name='mmpose')
 
     @classmethod
@@ -212,11 +230,15 @@ class _MMPoseBackend(PoseBackend):
         inferencer = cls._get_model()
         h, w = frame_bgr.shape[:2]
 
+        t0 = time.perf_counter()
         result_gen = inferencer(frame_bgr, return_vis=False, return_datasample=False)
         result = next(result_gen)
+        log.info("%s inference: %.0f ms  (%dx%d)", cls.backend_id,
+                 (time.perf_counter() - t0) * 1000, w, h)
 
         predictions = result.get('predictions', [[]])
         if not predictions or not predictions[0]:
+            log.warning("%s: no predictions returned", cls.backend_id)
             return []
 
         pred = predictions[0][0]
@@ -229,16 +251,18 @@ class _MMPoseBackend(PoseBackend):
             y_norm = kp[1] / h
             name = cls._joint_names[i] if i < len(cls._joint_names) else f'kp_{i}'
             landmarks.append(_make_landmark(i, name, x_norm, y_norm, 0.0, float(score)))
+        log.info("%s: %d landmarks detected", cls.backend_id, len(landmarks))
         return landmarks
 
 
 # ── RTMPose-L Wholebody ───────────────────────────────────────────────────────
 
 class RTMPoseBackend(_MMPoseBackend):
-    backend_id           = 'rtmpose'
-    display_name         = 'RTMPose-L Wholebody'
-    _mmpose_model_alias  = 'wholebody'
-    _joint_names         = COCO_WHOLEBODY_JOINT_NAMES
+    backend_id                = 'rtmpose'
+    display_name              = 'RTMPose-L Wholebody'
+    _mmpose_model_alias       = 'wholebody'
+    _mmpose_checkpoint_file   = 'rtmpose-l_simcc-ucoco_dw-ucoco_270e-256x192-dcf277bf_20230728.pth'
+    _joint_names              = COCO_WHOLEBODY_JOINT_NAMES
 
     @classmethod
     def connections(cls):
@@ -248,10 +272,11 @@ class RTMPoseBackend(_MMPoseBackend):
 # ── ViTPose-H ────────────────────────────────────────────────────────────────
 
 class ViTPoseBackend(_MMPoseBackend):
-    backend_id           = 'vitpose'
-    display_name         = 'ViTPose-H'
-    _mmpose_model_alias  = 'td-hm_ViTPose-huge_8xb64-210e_coco-256x192'
-    _joint_names         = COCO17_JOINT_NAMES
+    backend_id                = 'vitpose'
+    display_name              = 'ViTPose-H'
+    _mmpose_model_alias       = 'td-hm_ViTPose-huge_8xb64-210e_coco-256x192'
+    _mmpose_checkpoint_file   = 'td-hm_ViTPose-huge_8xb64-210e_coco-256x192-e32adcd4_20230314.pth'
+    _joint_names              = COCO17_JOINT_NAMES
 
     @classmethod
     def connections(cls):
@@ -311,11 +336,19 @@ def draw_combined(frame_bgr: np.ndarray,
 # ── Availability ──────────────────────────────────────────────────────────────
 
 def _has(lib: str) -> bool:
-    return importlib.util.find_spec(lib) is not None
+    try:
+        import importlib
+        importlib.import_module(lib)
+        return True
+    except Exception as e:
+        log.warning("_has(%s): import failed – %s: %s", lib, type(e).__name__, e)
+        return False
 
 MediaPipeBackend.available = _has('mediapipe')
+log.info("MediaPipe available: %s", MediaPipeBackend.available)
 RTMPoseBackend.available   = _has('mmpose')
 ViTPoseBackend.available   = _has('mmpose')
+log.info("MMPose available: %s", RTMPoseBackend.available)
 
 ALL_BACKENDS: List[type] = [MediaPipeBackend, RTMPoseBackend, ViTPoseBackend]
 BACKEND_BY_ID: Dict[str, type] = {b.backend_id: b for b in ALL_BACKENDS}

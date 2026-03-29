@@ -86,10 +86,17 @@
   <!-- Video Player -->
   <div class="card mb-16">
     <div class="card-header">Video</div>
-    <div class="card-body" style="padding:0">
-      <video controls style="width:100%;max-height:480px;display:block;background:#000">
+    <div class="card-body" style="padding:0;position:relative">
+      <video id="videoPlayer" controls style="width:100%;max-height:480px;display:block;background:#000">
         <source src="{% url 'video_stream' video.pk %}" type="video/mp4">
       </video>
+      <div id="frameCounter" style="
+        position:absolute;bottom:48px;right:10px;
+        background:rgba(0,0,0,.65);color:#c8f060;
+        font-family:monospace;font-size:12px;font-weight:600;
+        padding:3px 8px;border-radius:4px;pointer-events:none;
+        letter-spacing:.04em;
+      ">Frame 0</div>
     </div>
   </div>
 
@@ -116,6 +123,24 @@
         <div class="form-group">
           <label>cy (Hauptpunkt Y)</label>
           <input type="number" id="cy" placeholder="z.B. 540" step="1">
+        </div>
+      </div>
+      <div class="grid-4" style="gap:12px;margin-top:12px">
+        <div class="form-group">
+          <label>Orient Epochen</label>
+          <input type="number" id="n_orient_epochs" value="600" step="100" min="100" max="5000">
+        </div>
+        <div class="form-group">
+          <label>Pose Epochen</label>
+          <input type="number" id="n_pose_epochs" value="900" step="100" min="100" max="10000">
+        </div>
+        <div class="form-group">
+          <label>Smooth · Vergangenheit (n_past)</label>
+          <input type="number" id="smooth_n_past" value="5" step="1" min="1" max="30">
+        </div>
+        <div class="form-group">
+          <label>Smooth · Schrittweite (k_stride)</label>
+          <input type="number" id="smooth_k_stride" value="3" step="1" min="1" max="30">
         </div>
       </div>
       <div class="flex gap-8">
@@ -149,7 +174,7 @@
       {% if persons %}
       <div class="person-grid">
         {% for person in persons %}
-        <div class="person-card" style="cursor:default">
+        <div class="person-card" style="cursor:pointer" onclick="seekToClip({{ person.frame_start }}, {{ person.frame_end }})" title="Zu Clip springen (Frame {{ person.frame_start }}–{{ person.frame_end }})">
           {% if person.thumbnail %}
             <img src="{{ person.thumbnail.url }}" alt="">
           {% else %}
@@ -227,6 +252,10 @@
       <span class="backend-row-name">Kombiniert</span>
       <span style="font-size:11px;color:#666;font-weight:400;margin-left:4px">ViTPose Körper · RTMPose Gesicht &amp; Hände</span>
       <span class="backend-row-status" id="dbgCombinedStatus" style="margin-left:auto"></span>
+      <button class="btn btn-primary btn-sm" id="dbgSmplxBtn"
+              onclick="fitSmplx()" style="margin-left:12px">SMPL-X fitten</button>
+      <button class="btn btn-secondary btn-sm" id="dbgSmplxSmoothBtn"
+              onclick="fitSmplxSmooth()" style="margin-left:6px" title="Letzte N Frames mitnehmen und Savitzky-Golay glätten">Geglättet</button>
     </div>
     <!-- legend -->
     <div style="display:flex;gap:16px;padding:8px 16px;border-top:1px solid #333;font-size:11px;flex-wrap:wrap">
@@ -250,6 +279,23 @@
     </div>
   </div>
 
+  <!-- SMPL-X fit result card -->
+  <div class="card mb-16" id="dbgSmplxCard" style="display:none">
+    <div class="backend-row-header">
+      <span class="backend-row-name">SMPL-X Overlay</span>
+      <span style="font-size:11px;color:#666;font-weight:400;margin-left:4px">Fitted mesh · gelb = erkannte Punkte · blau = gefittete Joints</span>
+      <span class="backend-row-status" id="dbgSmplxStatus" style="margin-left:auto"></span>
+    </div>
+    <div id="dbgSmplxImgWrap" style="border-top:1px solid #333">
+      <div style="padding:40px;text-align:center;color:#555;font-size:13px" id="dbgSmplxPlaceholder">
+        Drücke "SMPL-X fitten" um das Mesh auf den aktuellen Frame zu fitten.
+      </div>
+    </div>
+    <div id="dbgSmplxQuality" style="display:none;padding:10px 16px;border-top:1px solid #333;
+         font-size:12px;font-family:monospace;color:#888;gap:20px;flex-wrap:wrap">
+    </div>
+  </div>
+
 </div><!-- /tab-debug -->
 
 {% endblock %}
@@ -258,6 +304,40 @@
 <script>
 const VIDEO_ID = '{{ video.pk }}';
 const DETECTION_STATUS = '{{ video.detection_status }}';
+const VIDEO_FPS = {{ video.fps|default:25 }};
+
+// ── Frame counter ─────────────────────────────────────────────────────────
+(function () {
+  const player = document.getElementById('videoPlayer');
+  const counter = document.getElementById('frameCounter');
+  if (!player || !counter) return;
+
+  let rafId = null;
+
+  function updateCounter() {
+    const frame = Math.round(player.currentTime * VIDEO_FPS);
+    counter.textContent = 'Frame ' + frame;
+  }
+
+  function rafLoop() {
+    updateCounter();
+    rafId = requestAnimationFrame(rafLoop);
+  }
+
+  player.addEventListener('play',   () => { if (!rafId) rafId = requestAnimationFrame(rafLoop); });
+  player.addEventListener('pause',  () => { cancelAnimationFrame(rafId); rafId = null; updateCounter(); });
+  player.addEventListener('seeked', updateCounter);
+  player.addEventListener('ended',  () => { cancelAnimationFrame(rafId); rafId = null; updateCounter(); });
+})();
+
+// ── Clip seeking ───────────────────────────────────────────────────────────
+function seekToClip(frameStart, frameEnd) {
+  const player = document.getElementById('videoPlayer');
+  if (!player) return;
+  player.currentTime = frameStart / VIDEO_FPS;
+  player.scrollIntoView({ behavior: 'smooth', block: 'center' });
+  player.play();
+}
 
 // ── Tab switching ─────────────────────────────────────────────────────────
 function switchTab(name, btn) {
@@ -335,6 +415,9 @@ const DEBUG_URL         = '{% url "video_debug_frame" video.pk %}';
 const BACKEND_URL       = '{% url "video_debug_frame_backend" video.pk %}';
 const BACKENDS_LIST_URL = '{% url "video_debug_backends" video.pk %}';
 const COMBINED_URL      = '{% url "video_debug_frame_combined" video.pk %}';
+const SMPLX_URL          = '{% url "video_debug_frame_smplx" video.pk %}';
+const SMPLX_PROGRESS_URL = '{% url "video_debug_smplx_progress" video.pk %}';
+const SMPLX_SMOOTH_URL   = '{% url "video_debug_frame_smplx_smooth" video.pk %}';
 
 let dbgCurrentFrame = null;
 let dbgTotalFrames  = null;
@@ -593,6 +676,234 @@ function loadCombined(frameIdx) {
       statusEl.textContent = 'Fehler';
       imgWrap.innerHTML = `<div style="padding:20px;color:#666;font-size:12px;font-family:monospace">${e}</div>`;
     });
+}
+
+// ── SMPL-X single-frame fitting ──────────────────────────────────────────────
+let _smplxPollTimer = null;
+
+function _stopSmplxPoll() {
+  if (_smplxPollTimer) { clearInterval(_smplxPollTimer); _smplxPollTimer = null; }
+}
+
+function _startSmplxPoll(fitId, statusEl, imgWrap) {
+  _stopSmplxPoll();
+  _smplxPollTimer = setInterval(async () => {
+    try {
+      const r = await fetch(`${SMPLX_PROGRESS_URL}?fit_id=${fitId}`);
+      const p = await r.json();
+      if (p.status === 'unknown') return;  // not started yet
+
+      const pct = p.total_all > 0 ? Math.round(p.epoch_all / p.total_all * 100) : 0;
+      const bar = pct < 100
+        ? `<div style="background:#2a2a2a;border-radius:3px;height:6px;margin-top:8px">
+             <div style="background:#c8f060;width:${pct}%;height:6px;border-radius:3px;transition:width .3s"></div>
+           </div>`
+        : '';
+      const lossStr = p.loss !== undefined ? ` · Loss: ${p.loss}` : '';
+      statusEl.style.color = '#888';
+      statusEl.textContent = `Fitting · ${p.epoch_all || 0}/${p.total_all || 500}${lossStr}`;
+      imgWrap.innerHTML =
+        `<div style="padding:32px 24px;color:#888;font-size:13px">
+           <b style="color:#aaa">${p.phase || 'Initialisiere…'}</b>
+           &nbsp; Epoche ${p.epoch_all || 0} / ${p.total_all || 500} (${pct}%)${lossStr}
+           ${bar}
+         </div>`;
+    } catch (_) {}
+  }, 500);
+}
+
+async function fitSmplx() {
+  if (dbgCurrentFrame === null) {
+    toast('Erst einen Frame laden', 'error');
+    return;
+  }
+
+  const btn       = document.getElementById('dbgSmplxBtn');
+  const card      = document.getElementById('dbgSmplxCard');
+  const statusEl  = document.getElementById('dbgSmplxStatus');
+  const imgWrap   = document.getElementById('dbgSmplxImgWrap');
+  const qualityEl = document.getElementById('dbgSmplxQuality');
+
+  btn.disabled = true;
+  btn.textContent = '…';
+  card.style.display = '';
+  statusEl.textContent = 'ROMP…';
+  statusEl.style.color = '#888';
+  qualityEl.style.display = 'none';
+  imgWrap.innerHTML = '<div style="padding:32px 24px;color:#666;font-size:13px">ROMP Initialisierung läuft…</div>';
+
+  // Camera intrinsics from Übersicht tab (if set)
+  const fx = document.getElementById('fx').value;
+  const fy = document.getElementById('fy').value;
+  const cx = document.getElementById('cx').value;
+  const cy = document.getElementById('cy').value;
+
+  // Unique ID so we can poll progress independently
+  const fitId = crypto.randomUUID();
+
+  const nOrient = document.getElementById('n_orient_epochs').value;
+  const nPose   = document.getElementById('n_pose_epochs').value;
+  let url = `${SMPLX_URL}?frame=${dbgCurrentFrame}&fit_id=${fitId}`;
+  if (fx && fy && cx && cy) url += `&fx=${fx}&fy=${fy}&cx=${cx}&cy=${cy}`;
+  if (nOrient) url += `&n_orient_epochs=${nOrient}`;
+  if (nPose)   url += `&n_pose_epochs=${nPose}`;
+
+  // Start progress polling
+  _startSmplxPoll(fitId, statusEl, imgWrap);
+
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+
+    _stopSmplxPoll();
+
+    if (d.error) {
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = 'Fehler';
+      imgWrap.innerHTML = `<div style="padding:20px;color:#e74c3c;font-size:12px;font-family:monospace">${d.error}</div>`;
+      toast('SMPL-X Fitting fehlgeschlagen', 'error');
+    } else {
+      statusEl.style.color = '#c8f060';
+      statusEl.textContent = `✓ Frame ${d.frame_idx}`;
+
+      imgWrap.innerHTML = '';
+
+      const img = document.createElement('img');
+      img.src = d.render;
+      img.style.cssText = 'display:block;width:100%';
+      imgWrap.appendChild(img);
+
+      // Phase-by-phase render strip
+      if (d.phase_renders && d.phase_renders.length) {
+        const dlBtn = document.createElement('button');
+        dlBtn.textContent = '⬇ Phasen herunterladen';
+        dlBtn.style.cssText = 'margin:6px 0;padding:4px 10px;font-size:11px;background:#222;color:#ccc;border:1px solid #444;border-radius:3px;cursor:pointer;';
+        dlBtn.onclick = () => {
+          d.phase_renders.forEach((ph, i) => {
+            const a = document.createElement('a');
+            a.href = ph.img;
+            a.download = `phase_${i+1}_${ph.label.replace(/\s+/g,'_')}.jpg`;
+            a.click();
+          });
+        };
+        imgWrap.appendChild(dlBtn);
+
+        const strip = document.createElement('div');
+        strip.style.cssText = 'display:flex;flex-wrap:wrap;gap:6px;padding:4px 0 8px;';
+        for (const ph of d.phase_renders) {
+          const cell = document.createElement('div');
+          cell.style.cssText = 'flex:0 0 auto;text-align:center;';
+          const pi = document.createElement('img');
+          pi.src = ph.img;
+          pi.style.cssText = 'display:block;height:160px;width:auto;border:1px solid #333;';
+          const lbl = document.createElement('div');
+          lbl.textContent = ph.label;
+          lbl.style.cssText = 'font-size:10px;color:#aaa;margin-top:2px;';
+          cell.appendChild(pi);
+          cell.appendChild(lbl);
+          strip.appendChild(cell);
+        }
+        imgWrap.appendChild(strip);
+      }
+
+      if (d.quality) {
+        const q = d.quality, intr = d.intrinsics;
+        qualityEl.style.display = 'flex';
+        qualityEl.style.flexWrap = 'wrap';
+        if (q.source === 'romp') {
+          qualityEl.innerHTML =
+            `<span style="color:#c8f060">✓ ROMP direkt</span>` +
+            `<span style="color:#888">${q.n_persons} Person(en)</span>` +
+            `<span style="color:#888">β: <b style="color:#7ec8e3">${q.beta.slice(0,4).map(v=>v.toFixed(3)).join(', ')}&hellip;</b></span>`;
+        } else {
+          const rompStr = d.romp
+            ? `<span style="color:#888">ROMP β: <b style="color:#7ec8e3">${d.romp.beta.slice(0,4).join(', ')}&hellip;</b></span>`
+            : `<span style="color:#555">ROMP: kein Fund</span>`;
+          qualityEl.innerHTML =
+            rompStr +
+            `<span>KP-Loss: <b style="color:#c8f060">${q.kp_loss}</b></span>` +
+            `<span>Tiefe: <b style="color:#c8f060">${q.depth_m} m</b></span>` +
+            `<span>Sichtbare Punkte: <b style="color:#c8f060">${q.n_visible}/12</b></span>` +
+            `<span>Epochen: <b style="color:#c8f060">${q.epochs}</b></span>` +
+            (intr ? `<span style="color:#555">fx=${intr.fx.toFixed(0)} fy=${intr.fy.toFixed(0)}</span>` : '');
+        }
+      }
+    }
+  } catch (e) {
+    _stopSmplxPoll();
+    statusEl.style.color = '#e74c3c';
+    statusEl.textContent = 'Netzwerkfehler';
+    imgWrap.innerHTML = `<div style="padding:20px;color:#666;font-size:12px;font-family:monospace">${e}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'SMPL-X fitten';
+  }
+}
+
+async function fitSmplxSmooth() {
+  if (dbgCurrentFrame === null) {
+    toast('Erst einen Frame laden', 'error');
+    return;
+  }
+
+  const btn      = document.getElementById('dbgSmplxSmoothBtn');
+  const card     = document.getElementById('dbgSmplxCard');
+  const statusEl = document.getElementById('dbgSmplxStatus');
+  const imgWrap  = document.getElementById('dbgSmplxImgWrap');
+  const qualityEl = document.getElementById('dbgSmplxQuality');
+
+  btn.disabled = true;
+  btn.textContent = '…';
+  card.style.display = '';
+  qualityEl.style.display = 'none';
+  statusEl.style.color = '#888';
+  statusEl.textContent = 'Smooth-Fit läuft…';
+  imgWrap.innerHTML = '<div style="padding:32px 24px;color:#666;font-size:13px">Vergangene Frames werden gefittet und geglättet…</div>';
+
+  const fx = document.getElementById('fx').value;
+  const fy = document.getElementById('fy').value;
+  const cx = document.getElementById('cx').value;
+  const cy = document.getElementById('cy').value;
+  const nPast   = document.getElementById('smooth_n_past').value   || 5;
+  const kStride = document.getElementById('smooth_k_stride').value || 3;
+
+  let url = `${SMPLX_SMOOTH_URL}?frame=${dbgCurrentFrame}&n_past=${nPast}&k_stride=${kStride}`;
+  if (fx && fy && cx && cy) url += `&fx=${fx}&fy=${fy}&cx=${cx}&cy=${cy}`;
+
+  try {
+    const r = await fetch(url);
+    const d = await r.json();
+
+    if (d.error) {
+      statusEl.style.color = '#e74c3c';
+      statusEl.textContent = 'Fehler';
+      imgWrap.innerHTML = `<div style="padding:20px;color:#e74c3c;font-size:12px;font-family:monospace">${d.error}</div>`;
+      toast('Smooth-Fit fehlgeschlagen', 'error');
+    } else {
+      statusEl.style.color = '#7ec8e3';
+      statusEl.textContent = `✓ Geglättet · Frame ${d.frame_idx}`;
+
+      imgWrap.innerHTML = '';
+      const img = document.createElement('img');
+      img.src = d.render;
+      img.style.cssText = 'display:block;width:100%';
+      imgWrap.appendChild(img);
+
+      qualityEl.style.display = 'flex';
+      qualityEl.style.flexWrap = 'wrap';
+      qualityEl.innerHTML =
+        `<span style="color:#7ec8e3">SG geglättet</span>` +
+        `<span style="color:#888">${d.n_frames_used} Frames · Fenster ${d.sg_window}</span>` +
+        `<span style="color:#888">Quelle: <b style="color:#aaa">${d.source}</b></span>`;
+    }
+  } catch (e) {
+    statusEl.style.color = '#e74c3c';
+    statusEl.textContent = 'Netzwerkfehler';
+    imgWrap.innerHTML = `<div style="padding:20px;color:#666;font-size:12px;font-family:monospace">${e}</div>`;
+  } finally {
+    btn.disabled = false;
+    btn.textContent = 'Geglättet';
+  }
 }
 
 // Init backends on page load

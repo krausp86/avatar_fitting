@@ -284,6 +284,9 @@ input[type=range] { accent-color: #c8f060; width: 100%; }
     <div class="nav-section">Avatare</div>
     <a href="{% url 'avatar_list' %}" class="nav-link {% block nav_avatars %}{% endblock %}">Bibliothek</a>
     <a href="{% url 'avatar_create' %}" class="nav-link {% block nav_create %}{% endblock %}">+ Neu erstellen</a>
+
+    <div class="nav-section">System</div>
+    <a href="{% url 'settings_shape' %}" class="nav-link {% block nav_settings %}{% endblock %}">Einstellungen</a>
   </nav>
   <div class="sidebar-footer">SOMA v0.1-dev</div>
 </aside>

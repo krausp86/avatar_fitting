@@ -168,10 +168,13 @@ def detect_persons_in_video(
         if mask_output_dir and masks:
             os.makedirs(mask_output_dir, exist_ok=True)
             mask_path = os.path.join(mask_output_dir, f"track_{t.track_id}_masks.npz")
+            # Store each frame's mask under its own key (e.g. 'f123') so that
+            # stage1 can load individual frames without decompressing the entire
+            # stacked array — which can be 10–30 GB uncompressed for long videos.
             np.savez_compressed(
                 mask_path,
                 frame_indices=np.array(sorted(masks.keys()), dtype=np.int32),
-                masks=np.stack([masks[k] for k in sorted(masks.keys())]),
+                **{f'f{fi}': masks[fi] for fi in sorted(masks.keys())},
             )
             t.mask_path = mask_path
         result.append(t)

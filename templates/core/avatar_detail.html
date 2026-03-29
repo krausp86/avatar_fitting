@@ -57,6 +57,17 @@
       </div>
     </div>
 
+    <!-- Fitting Log -->
+    <div class="card" id="logCard">
+      <div class="card-header" style="cursor:pointer;user-select:none" onclick="toggleLog()">
+        Fitting-Log
+        <span id="logToggleIcon" style="float:right;color:var(--muted);font-size:.8rem">▼</span>
+      </div>
+      <div id="logBody" style="display:none">
+        <pre id="logPre" style="margin:0;padding:10px 14px;font-size:.72rem;line-height:1.5;max-height:320px;overflow-y:auto;background:var(--surface);color:var(--fg);border-radius:0 0 6px 6px;white-space:pre-wrap;word-break:break-all">Lade…</pre>
+      </div>
+    </div>
+
     <!-- Recent jobs -->
     {% if jobs %}
     <div class="card">
@@ -228,6 +239,22 @@
           <input type="number" name="static_threshold" value="0.05" step="0.01" min="0.01" max="0.5">
         </div>
         <div class="form-group">
+          <label>Warm-up Epochen</label>
+          <input type="number" name="n_warmup_epochs" value="50" min="0" max="500" step="10">
+        </div>
+        <div class="form-group">
+          <label>Shape Epochen</label>
+          <input type="number" name="n_shape_epochs" value="200" min="0" max="1000" step="50">
+        </div>
+        <div class="form-group">
+          <label>Pose-Ref Epochen</label>
+          <input type="number" name="n_poseref_epochs" value="100" min="0" max="500" step="50">
+        </div>
+        <div class="form-group">
+          <label>Pose Epochen</label>
+          <input type="number" name="n_pose_epochs" value="300" min="50" max="2000" step="50">
+        </div>
+        <div class="form-group">
           <label>Cage-Vertices (N)</label>
           <input type="number" name="n_cage" value="60" min="20" max="200">
         </div>
@@ -297,13 +324,63 @@
 
 {% block extra_js %}
 <script>
-const AVATAR_ID = '{{ avatar.pk }}';
-const FIT_URL   = '{% url "avatar_fit" avatar.pk %}';
+const AVATAR_ID  = '{{ avatar.pk }}';
+const FIT_URL    = '{% url "avatar_fit" avatar.pk %}';
 const RENAME_URL = '{% url "avatar_rename" avatar.pk %}';
+const LOG_URL    = '{% url "avatar_log" avatar.pk %}';
 let   ws, lossHistory = [], lossCtx;
+let   logOpen = false, logPollTimer = null;
 
 function openFitModal()    { document.getElementById('fitModal').style.display    = 'flex'; }
 function openRenameModal() { document.getElementById('renameModal').style.display = 'flex'; }
+
+// ── Fitting Log ────────────────────────────────────────────────────────────
+function toggleLog() {
+  logOpen = !logOpen;
+  document.getElementById('logBody').style.display = logOpen ? '' : 'none';
+  document.getElementById('logToggleIcon').textContent = logOpen ? '▲' : '▼';
+  if (logOpen) fetchLog();
+}
+
+async function fetchLog() {
+  try {
+    const r = await fetch(LOG_URL);
+    const d = await r.json();
+    renderLog(d.lines);
+    // Auto-poll while fitting is running
+    clearTimeout(logPollTimer);
+    if (logOpen && d.avatar_status === 'fitting') {
+      logPollTimer = setTimeout(fetchLog, 3000);
+    }
+  } catch (e) {
+    document.getElementById('logPre').textContent = '⚠ Fehler beim Laden: ' + e.message;
+  }
+}
+
+function renderLog(lines) {
+  const pre  = document.getElementById('logPre');
+  const atBottom = pre.scrollHeight - pre.scrollTop <= pre.clientHeight + 20;
+  if (!lines || lines.length === 0) {
+    pre.textContent = '(noch kein Log)';
+    return;
+  }
+  pre.textContent = lines.map(l => {
+    const ts  = l.ts ? l.ts.replace('T', ' ').slice(0, 19) + '  ' : '';
+    const src = l.source === 'shape' ? '[shape] ' : '[fit]   ';
+    return ts + src + l.msg;
+  }).join('\n');
+  if (atBottom) pre.scrollTop = pre.scrollHeight;
+}
+
+// Auto-open and poll if fitting is currently running
+{% if avatar.status == 'fitting' %}
+document.addEventListener('DOMContentLoaded', () => {
+  document.getElementById('logBody').style.display = '';
+  document.getElementById('logToggleIcon').textContent = '▲';
+  logOpen = true;
+  fetchLog();
+});
+{% endif %}
 
 async function startFitting() {
   document.getElementById('fitModal').style.display = 'none';
@@ -311,7 +388,7 @@ async function startFitting() {
   const fd = new FormData();
   fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
   document.querySelectorAll('input[name=stages]:checked').forEach(el => fd.append('stages', el.value));
-  ['gender','max_frames','static_threshold','n_cage','tex_res_body','tex_res_face','inpainting'].forEach(n => {
+  ['gender','max_frames','static_threshold','n_warmup_epochs','n_shape_epochs','n_poseref_epochs','n_pose_epochs','n_cage','tex_res_body','tex_res_face','inpainting'].forEach(n => {
     const el = document.querySelector(`[name=${n}]`);
     if (el) fd.append(n, el.value);
   });
