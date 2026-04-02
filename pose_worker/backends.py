@@ -106,8 +106,13 @@ class PoseBackend(ABC):
                 if cls.backend_id not in _MODEL_CACHE:  # re-check after acquiring
                     log.info(">>> Loading model: %s – this may take 1-3 minutes …", cls.backend_id)
                     t0 = time.perf_counter()
-                    _MODEL_CACHE[cls.backend_id] = cls._load_model()
-                    log.info(">>> Model ready: %s  (%.1f s)", cls.backend_id, time.perf_counter() - t0)
+                    try:
+                        _MODEL_CACHE[cls.backend_id] = cls._load_model()
+                        log.info(">>> Model ready: %s  (%.1f s)", cls.backend_id, time.perf_counter() - t0)
+                    except Exception as e:
+                        log.error(">>> Model load failed: %s – %s. Marking unavailable.", cls.backend_id, e)
+                        cls.available = False
+                        raise
         return _MODEL_CACHE[cls.backend_id]
 
     @classmethod
@@ -333,6 +338,166 @@ def draw_combined(frame_bgr: np.ndarray,
     return vis_img
 
 
+# ── SMPLer-X (Expressive Body Regression) ────────────────────────────────────
+
+class SMPLerXBackend(PoseBackend):
+    """
+    SMPLer-X: one-stage expressive human body estimation via MMPose 3D.
+    Gibt SMPL-X Parameter (beta, body_pose, expression, jaw, hands, transl) zurück.
+
+    Weights: /data/models/smpler_x/smpler_x_h32.pth.tar
+    Modell-Alias für MMPose: 'smpler_x_h32'
+    Referenz: https://github.com/caizhongang/SMPLer-X
+    """
+    backend_id   = 'smpler_x'
+    display_name = 'SMPLer-X (Expressive Body)'
+
+    _CHECKPOINT_NAMES = [
+        'smpler_x/smpler_x_h32.pth.tar',
+        'smpler_x_h32.pth.tar',
+        'smpler_x/smpler_x_b32.pth.tar',
+        'smpler_x_b32.pth.tar',
+    ]
+    # MMPose model aliases to try in order
+    _MODEL_ALIASES = ['smpler_x_h32', 'smpler_x_b32']
+
+    @classmethod
+    def _find_checkpoint(cls) -> Optional[str]:
+        for name in cls._CHECKPOINT_NAMES:
+            path = os.path.join('/data/models', name)
+            if os.path.exists(path):
+                log.info("SMPLer-X: found checkpoint %s", path)
+                return path
+        log.warning("SMPLer-X: no checkpoint found in /data/models; "
+                    "will try mim download (requires internet)")
+        return None
+
+    @classmethod
+    def _load_model(cls):
+        from mmpose.apis import MMPoseInferencer
+        import torch, uuid
+        from mmengine.registry import DefaultScope
+        device = 'cuda:0' if torch.cuda.is_available() else 'cpu'
+        log.info("SMPLer-X: loading model on device=%s", device)
+
+        ckpt = cls._find_checkpoint()
+        last_err = None
+        for alias in cls._MODEL_ALIASES:
+            try:
+                scope_name = str(uuid.uuid4())
+                DefaultScope.get_instance(scope_name, scope_name='mmpose')
+                kwargs: Dict[str, Any] = dict(pose3d=alias, device=device)
+                if ckpt:
+                    kwargs['pose3d_weights'] = ckpt
+                inferencer = MMPoseInferencer(**kwargs)
+                log.info("SMPLer-X: loaded via alias '%s'", alias)
+                return inferencer
+            except Exception as e:
+                log.warning("SMPLer-X: alias '%s' failed – %s", alias, e)
+                last_err = e
+        raise RuntimeError(f"SMPLer-X: all model aliases failed. Last error: {last_err}")
+
+    @classmethod
+    def regress(cls, frame_bgr: np.ndarray) -> Optional[Dict[str, List[float]]]:
+        """
+        Führt SMPL-X Regression durch und gibt die Parameter für die
+        prominenteste Person zurück.
+
+        Returns:
+            Dict mit Keys: beta(10), body_pose(63), global_orient(3),
+            transl(3), expression(10), jaw_pose(3),
+            left_hand_pose(45), right_hand_pose(45)
+            oder None wenn keine Person detektiert.
+        """
+        inferencer = cls._get_model()
+
+        try:
+            result_gen = inferencer(frame_bgr, return_vis=False, return_datasample=False)
+            result = next(result_gen)
+        except StopIteration:
+            log.warning("SMPLer-X: no result (StopIteration)")
+            return None
+        except Exception as e:
+            log.error("SMPLer-X inference error: %s", e)
+            return None
+
+        predictions = result.get('predictions', [[]])
+        if not predictions or not predictions[0]:
+            return None
+
+        pred = predictions[0][0]
+
+        # MMPose 3D-Inferenz: SMPL-X-Parameter können unter verschiedenen Keys stehen
+        smplx: Dict[str, Any] = {}
+        for key in ('smplx_param', 'smplx_params', 'param', 'smpl_param'):
+            if key in pred and isinstance(pred[key], dict):
+                smplx = pred[key]
+                log.debug("SMPLer-X: found params under key '%s'", key)
+                break
+
+        if not smplx:
+            # Fallback: Parameter direkt im pred-Dict suchen
+            smplx = pred
+            log.debug("SMPLer-X: params directly in pred dict")
+
+        def _to_floats(v, n: int) -> List[float]:
+            """Tensor/array/list → flat Python float list, zero-padded to length n."""
+            if v is None:
+                return [0.0] * n
+            try:
+                import numpy as _np
+                if hasattr(v, 'detach'):
+                    v = v.detach().cpu().numpy()
+                arr = _np.asarray(v, dtype=float).flatten()
+                result_arr = arr[:n].tolist()
+                if len(result_arr) < n:
+                    result_arr += [0.0] * (n - len(result_arr))
+                return result_arr
+            except Exception:
+                return [0.0] * n
+
+        def _get(keys, n):
+            for k in keys:
+                if k in smplx:
+                    return _to_floats(smplx[k], n)
+            return [0.0] * n
+
+        return {
+            'beta':            _get(['betas', 'beta', 'shape'], 10),
+            'body_pose':       _get(['body_pose', 'pose'], 63),
+            'global_orient':   _get(['global_orient', 'root_pose'], 3),
+            'transl':          _get(['transl', 'translation'], 3),
+            'expression':      _get(['expression', 'expr'], 10),
+            'jaw_pose':        _get(['jaw_pose'], 3),
+            'left_hand_pose':  _get(['left_hand_pose', 'lhand_pose'], 45),
+            'right_hand_pose': _get(['right_hand_pose', 'rhand_pose'], 45),
+        }
+
+    @classmethod
+    def detect(cls, frame_bgr: np.ndarray) -> List[Dict]:
+        """detect() interface — liefert 3D-Keypoints als 2D-Projektion zurück."""
+        inferencer = cls._get_model()
+        try:
+            result_gen = inferencer(frame_bgr, return_vis=False, return_datasample=False)
+            result = next(result_gen)
+        except StopIteration:
+            return []
+        predictions = result.get('predictions', [[]])
+        if not predictions or not predictions[0]:
+            return []
+        pred = predictions[0][0]
+        keypoints = pred.get('keypoints', [])
+        scores = pred.get('keypoint_scores', [])
+        h, w = frame_bgr.shape[:2]
+        landmarks = []
+        for i, (kp, score) in enumerate(zip(keypoints, scores)):
+            # kp kann [x,y] oder [x,y,z] sein – erste 2 Werte als 2D verwenden
+            x_norm = float(kp[0]) / w if float(kp[0]) > 1.0 else float(kp[0])
+            y_norm = float(kp[1]) / h if float(kp[1]) > 1.0 else float(kp[1])
+            landmarks.append(_make_landmark(i, f'smplx_{i}', x_norm, y_norm, 0.0, float(score)))
+        return landmarks
+
+
 # ── Availability ──────────────────────────────────────────────────────────────
 
 def _has(lib: str) -> bool:
@@ -344,11 +509,128 @@ def _has(lib: str) -> bool:
         log.warning("_has(%s): import failed – %s: %s", lib, type(e).__name__, e)
         return False
 
+# ── 4D-Humans / HMR2 ─────────────────────────────────────────────────────────
+
+class HMR2Backend:
+    backend_id   = 'hmr2'
+    display_name = '4D-Humans HMR2'
+    available    = False
+    _model       = None
+    _cfg         = None
+
+    CACHE_DIR = '/data/models/hmr2'
+
+    @classmethod
+    def _find_checkpoint(cls):
+        """Find checkpoint file in CACHE_DIR, return path or None."""
+        import glob
+        from pathlib import Path
+        patterns = [
+            f'{cls.CACHE_DIR}/**/*.ckpt',
+            f'{cls.CACHE_DIR}/**/*.pth',
+            f'{cls.CACHE_DIR}/**/*.pt',
+        ]
+        for pattern in patterns:
+            hits = glob.glob(pattern, recursive=True)
+            if hits:
+                ckpt = max(hits, key=lambda p: os.path.getsize(p))
+                log.info("HMR2: found checkpoint %s", ckpt)
+                return ckpt
+        return None
+
+    @classmethod
+    def _load(cls):
+        from hmr2.models import load_hmr2, download_models
+        from pathlib import Path
+        ckpt_dir = Path(cls.CACHE_DIR)
+        ckpt_dir.mkdir(parents=True, exist_ok=True)
+
+        ckpt = cls._find_checkpoint()
+        if ckpt is None:
+            log.info("HMR2: no checkpoint found – downloading to %s …", ckpt_dir)
+            download_models(str(ckpt_dir))
+            ckpt = cls._find_checkpoint()
+        if ckpt is None:
+            raise RuntimeError(f"HMR2: no checkpoint found in {cls.CACHE_DIR} after download")
+
+        log.info("HMR2: loading from %s", ckpt)
+        model, cfg = load_hmr2(ckpt)
+        model = model.eval()
+        log.info("HMR2: model ready")
+        return model, cfg
+
+    @classmethod
+    def regress(cls, frame_bgr: np.ndarray) -> Optional[Dict]:
+        import torch
+        from scipy.spatial.transform import Rotation
+
+        if cls._model is None:
+            cls._model, cls._cfg = cls._load()
+
+        img_rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+
+        # Preprocess: 256×256, ImageNet normalisation
+        try:
+            from hmr2.datasets.vitdet_dataset import DEFAULT_MEAN, DEFAULT_STD
+            mean = np.array(DEFAULT_MEAN, dtype=np.float32)
+            std  = np.array(DEFAULT_STD,  dtype=np.float32)
+        except ImportError:
+            mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)
+            std  = np.array([0.229, 0.224, 0.225], dtype=np.float32)
+
+        img = cv2.resize(img_rgb, (256, 256)).astype(np.float32) / 255.0
+        img = (img - mean) / std                                   # (256, 256, 3)
+        img_t = torch.tensor(img).permute(2, 0, 1).unsqueeze(0)   # (1, 3, 256, 256)
+
+        with torch.no_grad():
+            out = cls._model({'img': img_t})
+
+        smpl = out['pred_smpl_params']
+
+        # Rotation matrices → axis-angle
+        body_rotmat   = smpl['body_pose'][0].cpu().numpy()     # (23, 3, 3)
+        global_rotmat = smpl['global_orient'][0].cpu().numpy() # (1,  3, 3)
+
+        # SMPL-X body: 21 joints (SMPL joints 0-20; joints 21-22 are hand roots → skip)
+        body_aa   = Rotation.from_matrix(body_rotmat[:21]).as_rotvec().flatten().tolist()  # 63
+        global_aa = Rotation.from_matrix(global_rotmat[0]).as_rotvec().tolist()            # 3
+        betas     = smpl['betas'][0].cpu().numpy().tolist()                                # 10
+
+        # Rough translation from weak-perspective camera
+        pred_cam = out.get('pred_cam')
+        if pred_cam is not None:
+            s, tx, ty = pred_cam[0].cpu().numpy()
+            transl = [float(tx), float(ty), float(10.0 / max(s, 0.1))]
+        else:
+            transl = [0.0, 0.0, 3.0]
+
+        return {
+            'betas':            betas,
+            'body_pose':        body_aa,
+            'global_orient':    global_aa,
+            'transl':           transl,
+            'expression':       [0.0] * 10,
+            'jaw_pose':         [0.0] * 3,
+            'left_hand_pose':   [0.0] * 12,
+            'right_hand_pose':  [0.0] * 12,
+        }
+
+
 MediaPipeBackend.available = _has('mediapipe')
 log.info("MediaPipe available: %s", MediaPipeBackend.available)
 RTMPoseBackend.available   = _has('mmpose')
 ViTPoseBackend.available   = _has('mmpose')
 log.info("MMPose available: %s", RTMPoseBackend.available)
 
-ALL_BACKENDS: List[type] = [MediaPipeBackend, RTMPoseBackend, ViTPoseBackend]
+# SMPLer-X: verfügbar wenn mmpose UND smplx installiert
+_smplx_pkg_available = _has('smplx')
+SMPLerXBackend.available = RTMPoseBackend.available and _smplx_pkg_available
+log.info("SMPLer-X available: %s (mmpose=%s, smplx=%s)",
+         SMPLerXBackend.available, RTMPoseBackend.available, _smplx_pkg_available)
+
+# HMR2
+HMR2Backend.available = _has('hmr2')
+log.info("HMR2 available: %s", HMR2Backend.available)
+
+ALL_BACKENDS: List[type] = [MediaPipeBackend, RTMPoseBackend, ViTPoseBackend, SMPLerXBackend]
 BACKEND_BY_ID: Dict[str, type] = {b.backend_id: b for b in ALL_BACKENDS}

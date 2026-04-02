@@ -196,6 +196,68 @@ def combined_analyze(frame_bgr) -> dict:
     }
 
 
+# Circuit-breaker: set to True after first permanent failure so we stop retrying.
+_smplx_permanently_unavailable = False
+
+
+def smplx_regress(frame_bgr: np.ndarray) -> Optional[dict]:
+    """
+    Ruft SMPLer-X Regression auf dem pose-worker auf.
+    Gibt SMPL-X Parameter zurück oder None wenn keine Person erkannt / nicht verfügbar.
+
+    Returns dict mit Keys:
+        beta (10), body_pose (63), global_orient (3), transl (3),
+        expression (10), jaw_pose (3),
+        left_hand_pose (45), right_hand_pose (45)
+    """
+    global _smplx_permanently_unavailable
+    if _smplx_permanently_unavailable:
+        return None
+
+    import httpx
+    payload = {"frame_b64": _encode_frame(frame_bgr)}
+    try:
+        resp = httpx.post(f"{POSE_WORKER_URL}/hmr2/regress", json=payload, timeout=120.0)
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code in (500, 503):
+            log.warning("smplx_regress: HMR2 permanently unavailable (%d) – disabling for this run. %s",
+                        e.response.status_code, e.response.text[:200])
+            _smplx_permanently_unavailable = True
+            return None
+        log.error("smplx_regress: HTTP %d – %s", e.response.status_code, e.response.text[:200])
+        return None
+    except Exception as e:
+        log.warning("smplx_regress: request failed – %s", e)
+        return None
+    data = resp.json()
+    if not data.get("detection"):
+        return None
+    return data.get("params")
+
+
+async def async_smplx_regress(frame_bgr: np.ndarray) -> Optional[dict]:
+    """Async version von smplx_regress."""
+    if _smplx_permanently_unavailable:
+        return None
+    import httpx
+    payload = {"frame_b64": _encode_frame(frame_bgr)}
+    try:
+        async with httpx.AsyncClient(timeout=3600.0) as client:
+            resp = await client.post(f"{POSE_WORKER_URL}/smplx/regress", json=payload)
+        if resp.status_code in (500, 503):
+            log.warning("async_smplx_regress: SMPLer-X unavailable (%d)", resp.status_code)
+            return None
+        resp.raise_for_status()
+    except Exception as e:
+        log.warning("async_smplx_regress: %s: %s", type(e).__name__, e)
+        return None
+    data = resp.json()
+    if not data.get("detection"):
+        return None
+    return data.get("params")
+
+
 async def async_combined_analyze(frame_bgr) -> dict:
     """Async version – doesn't block the event loop while waiting for pose-worker."""
     import httpx

@@ -19,6 +19,32 @@ MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/po
 MODEL_PATH = "/tmp/pose_landmarker_heavy.task"
 
 
+def _extract_segmask(mp_mask) -> np.ndarray | None:
+    """Convert a MediaPipe segmentation mask to a uint8 binary array (0/1).
+
+    MediaPipe 0.10.33 changed the internal image format for segmentation masks
+    from single-channel float32 (VEC32F1) to SRGBA in some builds.  Calling
+    numpy_view() on an SRGBA image triggers a C++ FATAL abort (uncatchable by
+    Python).  We inspect the image_format first and handle both cases.
+    """
+    try:
+        fmt = mp_mask.image_format  # mp.ImageFormat enum
+        import mediapipe as _mp
+        if fmt == _mp.ImageFormat.SRGBA:
+            # 4-channel uint8; use the alpha channel as confidence
+            arr = np.frombuffer(mp_mask.data, dtype=np.uint8).reshape(
+                mp_mask.height, mp_mask.width, 4
+            )
+            return (arr[:, :, 3] > 127).astype(np.uint8)
+        else:
+            # Single-channel float32 (original format)
+            raw = mp_mask.numpy_view()
+            return (raw > 0.5).astype(np.uint8)
+    except Exception as e:
+        log.debug("_extract_segmask: skipping mask – %s", e)
+        return None
+
+
 def _ensure_model():
     if not os.path.exists(MODEL_PATH):
         log.info("Downloading MediaPipe pose model…")
@@ -75,7 +101,10 @@ def detect_persons_in_video(
             delegate=BaseOptions.Delegate.CPU,
         ),
         running_mode=VisionRunningMode.VIDEO,
-        output_segmentation_masks=True,
+        # Segmentation masks disabled: accessing mp_mask.data triggers a C++ FATAL
+        # abort (image_frame.cc CopyToBuffer: 1 == ChannelSize()) in some MediaPipe
+        # builds when the mask is returned as SRGBA instead of VEC32F1.
+        output_segmentation_masks=False,
         num_poses=1,
     )
 
@@ -115,6 +144,10 @@ def detect_persons_in_video(
                     still_active.append(t)
             active_tracks = still_active
 
+            if frame.ndim == 2:
+                frame = cv2.cvtColor(frame, cv2.COLOR_GRAY2BGR)
+            elif frame.shape[2] == 4:
+                frame = frame[:, :, :3]
             rgb       = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             mp_image  = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb)
             timestamp = int(raw_idx / fps * 1000)
@@ -125,10 +158,7 @@ def detect_persons_in_video(
                 bbox       = _landmarks_to_bbox(landmarks, margin=0.1)
                 visibility = _mean_visibility(landmarks)
 
-                mask = None
-                if results.segmentation_masks:
-                    raw_mask = results.segmentation_masks[0].numpy_view()
-                    mask = (raw_mask > 0.5).astype(np.uint8)
+                mask = None  # segmentation disabled (see options above)
 
                 track = _match_to_track(bbox, active_tracks, iou_threshold)
                 if track is None:

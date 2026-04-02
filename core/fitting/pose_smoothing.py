@@ -109,3 +109,63 @@ def store_and_smooth_poses(
         batch_size=500,
     )
     log.info("store_and_smooth_poses: smoothed values written (%d rows)", len(rows))
+
+
+def smooth_new_fields(
+    person_ids: list[str],
+    sg_window:  int = _SG_WINDOW,
+    sg_poly:    int = _SG_POLY,
+) -> None:
+    """
+    Savitzky-Golay Smoothing für die neuen Phase-B Felder:
+    expression, jaw_pose, left_hand_pose, right_hand_pose.
+
+    Wird nach run_phase_b_results aufgerufen.
+    """
+    from scipy.signal import savgol_filter
+    from ..models import PersonFramePose
+
+    person_ids = list(set(person_ids))
+    rows_all = list(PersonFramePose.objects
+                    .filter(person_id__in=person_ids)
+                    .order_by('person_id', 'frame_idx'))
+
+    if not rows_all:
+        return
+
+    # Gruppieren nach Person
+    by_person: dict[str, list] = defaultdict(list)
+    for row in rows_all:
+        by_person[str(row.person_id)].append(row)
+
+    fields_to_smooth = [
+        ('expression',      'expression_smooth'),
+        ('jaw_pose',        'jaw_pose_smooth'),
+        ('left_hand_pose',  'left_hand_pose_smooth'),
+        ('right_hand_pose', 'right_hand_pose_smooth'),
+    ]
+
+    updated_rows = []
+    for person_id, rows in by_person.items():
+        n = len(rows)
+        w = sg_window if n >= sg_window else (n if n % 2 == 1 else max(1, n - 1))
+        apply_sg = w >= sg_poly + 1
+
+        for raw_field, smooth_field in fields_to_smooth:
+            raw_data = np.array([getattr(r, raw_field) or [] for r in rows],
+                                dtype=np.float32)  # (n, D)
+            if raw_data.ndim < 2 or raw_data.shape[1] == 0:
+                continue
+            if apply_sg:
+                smoothed = savgol_filter(raw_data, w, sg_poly, axis=0)
+            else:
+                smoothed = raw_data
+            for i, row in enumerate(rows):
+                setattr(row, smooth_field, smoothed[i].tolist())
+        updated_rows.extend(rows)
+        log.info("smooth_new_fields: person %s smoothed (%d frames, window=%d)",
+                 person_id, n, w)
+
+    update_fields = [sf for _, sf in fields_to_smooth]
+    PersonFramePose.objects.bulk_update(updated_rows, update_fields, batch_size=500)
+    log.info("smooth_new_fields: %d rows aktualisiert", len(updated_rows))

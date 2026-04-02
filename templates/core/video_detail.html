@@ -64,7 +64,8 @@
 {% endblock %}
 
 {% block topbar_actions %}
-<button class="btn btn-primary btn-sm" onclick="analyzeVideo()">⟳ Personen analysieren</button>
+<button class="btn btn-primary btn-sm" id="btnAnalyze" onclick="analyzeVideo()">⟳ Personen analysieren</button>
+<button class="btn btn-danger btn-sm" id="btnCancelDetect" style="display:none" onclick="cancelDetection()">✕ Erkennung abbrechen</button>
 <form method="post" action="{% url 'video_delete' video.pk %}" onsubmit="return confirm('Video aus DB entfernen?')">
   {% csrf_token %}
   <button type="submit" class="btn btn-danger btn-sm">✕ Entfernen</button>
@@ -370,11 +371,19 @@ async function saveIntrinsics() {
 let pollInterval = null;
 
 function setAnalyzing() {
-  document.querySelectorAll('[onclick="analyzeVideo()"]').forEach(b => { b.disabled = true; b.textContent = '…'; });
+  document.getElementById('btnAnalyze').style.display = 'none';
+  document.getElementById('btnCancelDetect').style.display = '';
   document.getElementById('analyzeProgress').style.display = '';
   document.getElementById('analyzeStage').textContent = 'Analyse läuft…';
   document.getElementById('analyzeBar').style.width = '30%';
   startPolling();
+}
+
+function setIdle() {
+  document.getElementById('btnAnalyze').style.display = '';
+  document.getElementById('btnCancelDetect').style.display = 'none';
+  document.getElementById('analyzeProgress').style.display = 'none';
+  if (pollInterval) { clearInterval(pollInterval); pollInterval = null; }
 }
 
 function startPolling() {
@@ -383,15 +392,15 @@ function startPolling() {
     const r = await fetch('{% url "detect_persons_status" video.pk %}');
     const d = await r.json();
     if (d.status === 'done') {
-      clearInterval(pollInterval);
+      clearInterval(pollInterval); pollInterval = null;
       document.getElementById('analyzeBar').style.width = '100%';
       document.getElementById('analyzeStage').textContent = `Abgeschlossen – ${d.person_count} Track(s)`;
       toast(`${d.person_count} Person(en) erkannt`);
       setTimeout(() => location.reload(), 900);
-    } else if (d.status === 'failed') {
-      clearInterval(pollInterval);
-      document.getElementById('analyzeStage').textContent = 'Fehler bei der Analyse';
-      toast('Analyse fehlgeschlagen', 'error');
+    } else if (d.status === 'failed' || d.status === 'pending') {
+      clearInterval(pollInterval); pollInterval = null;
+      setIdle();
+      if (d.status === 'failed') toast('Analyse fehlgeschlagen', 'error');
     }
   }, 2000);
 }
@@ -404,6 +413,14 @@ async function analyzeVideo() {
   if (d.status === 'started' || d.status === 'already_running') {
     setAnalyzing();
   }
+}
+
+async function cancelDetection() {
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  await fetch('{% url "detect_persons_cancel" video.pk %}', { method: 'POST', body: fd });
+  setIdle();
+  toast('Erkennung abgebrochen');
 }
 
 if (DETECTION_STATUS === 'detecting') {

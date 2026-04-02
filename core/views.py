@@ -102,6 +102,15 @@ def detect_persons_status(request, pk):
     })
 
 
+@require_POST
+def detect_persons_cancel(request, pk):
+    video = get_object_or_404(VideoSource, pk=pk)
+    if video.detection_status == 'detecting':
+        video.detection_status = 'pending'
+        video.save()
+    return JsonResponse({'status': video.detection_status})
+
+
 def video_detail(request, pk):
     video   = get_object_or_404(VideoSource, pk=pk)
     persons = video.persons.all().order_by('-frame_count')
@@ -646,6 +655,119 @@ async def video_debug_frame_backend(request, pk):
     return JsonResponse(result)
 
 
+async def video_debug_phase_b(request, pk):
+    """
+    Render already-fitted Phase B SMPL-X parameters for a specific person frame
+    from the database — no re-fitting.
+
+    GET params:
+        person  – DetectedPerson UUID (required)
+        frame   – frame index (required)
+        smooth  – 1 to use Savitzky-Golay smoothed variants (default 0)
+    """
+    import asyncio
+    from asgiref.sync import sync_to_async
+    from .models import PersonFramePose, DetectedPerson as _DetectedPerson, PersonShape
+    from .fitting.single_frame_fit import render_smplx_from_params
+
+    person_id  = request.GET.get('person')
+    frame_param = request.GET.get('frame')
+    use_smooth  = request.GET.get('smooth', '0') == '1'
+
+    if not person_id or frame_param is None:
+        return JsonResponse({'error': 'person und frame Parameter erforderlich'}, status=400)
+
+    try:
+        frame_idx = int(frame_param)
+    except ValueError:
+        return JsonResponse({'error': 'frame muss eine Ganzzahl sein'}, status=400)
+
+    video = await aget_object_or_404(VideoSource, pk=pk)
+    if not os.path.exists(video.path):
+        return JsonResponse({'error': 'Videodatei nicht gefunden'}, status=404)
+
+    pose_row = await sync_to_async(
+        lambda: PersonFramePose.objects.filter(
+            person_id=person_id, frame_idx=frame_idx
+        ).select_related('person').first()
+    )()
+    if pose_row is None:
+        return JsonResponse(
+            {'error': f'Keine Phase-B Daten für Person {person_id} Frame {frame_idx}'},
+            status=404,
+        )
+
+    # Load betas from PersonShape (fall back to zeros if unavailable)
+    betas = await sync_to_async(
+        lambda: next(
+            iter(PersonShape.objects.filter(
+                group__persons__id=person_id
+            ).values_list('betas', flat=True)[:1]),
+            [0.0] * 10,
+        )
+    )()
+
+    # Pick raw or smoothed variants
+    if use_smooth and pose_row.body_pose_smooth:
+        body_pose    = pose_row.body_pose_smooth
+        global_orient = pose_row.global_orient_smooth
+        transl        = pose_row.transl_smooth
+    else:
+        body_pose    = pose_row.body_pose
+        global_orient = pose_row.global_orient
+        transl        = pose_row.transl
+
+    # Read the video frame
+    frame_bgr, _, _, _ = await asyncio.to_thread(
+        _read_video_frame, video.path, str(frame_idx))
+    H, W = frame_bgr.shape[:2]
+
+    # Build minimal kp_px from the frame's PersonFrameKeypoints if available
+    from .models import PersonFrameKeypoints
+    kp_row = await sync_to_async(
+        lambda: PersonFrameKeypoints.objects.filter(
+            person_id=person_id, frame_idx=frame_idx
+        ).first()
+    )()
+    kp_px = []
+    if kp_row and kp_row.body_landmarks:
+        lm_map = {d['idx']: d for d in kp_row.body_landmarks}
+        from .fitting.single_frame_fit import _COCO_IDX
+        for coco_idx in _COCO_IDX:
+            d = lm_map.get(coco_idx)
+            if d:
+                kp_px.append([d['x'] * W, d['y'] * H, d['visibility']])
+            else:
+                kp_px.append([0.0, 0.0, 0.0])
+
+    f = max(W, H) * 1.2
+    # Weak-perspective cam params stored in Phase B
+    cam_scale = pose_row.cam_scale
+    if cam_scale and cam_scale > 0:
+        fx = fy = float(cam_scale) * max(W, H)
+        cx = W / 2.0 + (pose_row.cam_tx or 0.0) * fx
+        cy = H / 2.0 + (pose_row.cam_ty or 0.0) * fy
+    else:
+        fx = fy = f
+        cx = W / 2.0
+        cy = H / 2.0
+
+    rendered = await asyncio.to_thread(
+        render_smplx_from_params,
+        frame_bgr, body_pose, global_orient, transl, betas, kp_px,
+        fx, fy, cx, cy,
+    )
+
+    return JsonResponse({
+        'frame_idx':   frame_idx,
+        'person_id':   person_id,
+        'smooth':      use_smooth,
+        'render':      _frame_to_b64(rendered),
+        'has_face':    bool(pose_row.expression),
+        'has_hands':   bool(pose_row.left_hand_pose or pose_row.right_hand_pose),
+    })
+
+
 # ─── Persons ─────────────────────────────────────────────────────────────────
 
 def person_list(request):
@@ -900,6 +1022,21 @@ def avatar_fit(request, pk):
     }
     job = start_fitting_job(avatar, config)
     return JsonResponse({'job_id': str(job.id)})
+
+
+@require_POST
+def avatar_fit_cancel(request, pk):
+    from django.utils import timezone
+    avatar = get_object_or_404(Avatar, pk=pk)
+    if avatar.status == Avatar.Status.FITTING:
+        avatar.status = Avatar.Status.FAILED
+        avatar.save()
+        FittingJob.objects.filter(avatar=avatar, status__in=['queued', 'running']).update(
+            status='failed',
+            error='Manuell abgebrochen',
+            finished_at=timezone.now(),
+        )
+    return JsonResponse({'status': avatar.status})
 
 
 def avatar_edit(request, pk):

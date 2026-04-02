@@ -6,7 +6,8 @@
 
 {% block topbar_actions %}
 <a href="{% url 'avatar_edit' avatar.pk %}" class="btn btn-primary btn-sm">✎ Editor</a>
-<button class="btn btn-secondary btn-sm" onclick="openFitModal()">⚙ Fitting starten</button>
+<button class="btn btn-secondary btn-sm" id="btnStartFit" onclick="openFitModal()"{% if avatar.status == 'fitting' %} style="display:none"{% endif %}>⚙ Fitting starten</button>
+<button class="btn btn-danger btn-sm" id="btnCancelFit" onclick="cancelFitting()"{% if avatar.status != 'fitting' %} style="display:none"{% endif %}>✕ Fitting abbrechen</button>
 <button class="btn btn-ghost btn-sm" onclick="exportAvatar()">↓ Export</button>
 <button class="btn btn-ghost btn-sm" onclick="openRenameModal()">Umbenennen</button>
 <form method="post" action="{% url 'avatar_fork' avatar.pk %}" style="display:inline">
@@ -382,8 +383,21 @@ document.addEventListener('DOMContentLoaded', () => {
 });
 {% endif %}
 
+async function cancelFitting() {
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  await fetch('{% url "avatar_fit_cancel" avatar.pk %}', { method: 'POST', body: fd });
+  document.getElementById('btnCancelFit').style.display = 'none';
+  document.getElementById('btnStartFit').style.display = '';
+  document.getElementById('jobMonitor').style.display = 'none';
+  toast('Fitting abgebrochen');
+  setTimeout(() => location.reload(), 800);
+}
+
 async function startFitting() {
   document.getElementById('fitModal').style.display = 'none';
+  document.getElementById('btnStartFit').style.display = 'none';
+  document.getElementById('btnCancelFit').style.display = '';
 
   const fd = new FormData();
   fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
@@ -407,7 +421,7 @@ function connectWS(jobId) {
   ws.onmessage = (e) => handleProgress(JSON.parse(e.data));
 }
 
-const stageNames = {'1':'SMPL-X Fit','1.5':'Gesicht','2':'Offsets','2.5':'Textur','3':'Cage','4':'Physik','5':'PriorMLP'};
+const stageNames = {'0':'Beta-Schätzung','1':'SMPL-X Fit','1.5':'Gesicht','2':'Offsets','2.5':'Textur','3':'Cage','4':'Physik','5':'PriorMLP'};
 const stageDone  = new Set();
 
 function handleProgress(d) {
@@ -431,7 +445,7 @@ function handleProgress(d) {
 
 function updateStageList(activeStage, pct, loss, done) {
   const list = document.getElementById('stageList');
-  ['1','1.5','2','2.5','3','4','5'].forEach(s => {
+  ['0','1','1.5','2','2.5','3','4','5'].forEach(s => {
     let item = document.getElementById('stage-' + s);
     if (!item) {
       item = document.createElement('div');

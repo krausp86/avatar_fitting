@@ -11,12 +11,14 @@ urlpatterns = [
     path('videos/<uuid:pk>/', views.video_detail, name='video_detail'),
     path('videos/<uuid:pk>/detect/', views.detect_persons, name='detect_persons'),
     path('videos/<uuid:pk>/detect/status/', views.detect_persons_status, name='detect_persons_status'),
+    path('videos/<uuid:pk>/detect/cancel/', views.detect_persons_cancel, name='detect_persons_cancel'),
     path('videos/<uuid:pk>/debug/frame/', views.video_debug_frame, name='video_debug_frame'),
     path('videos/<uuid:pk>/debug/frame/backend/', views.video_debug_frame_backend, name='video_debug_frame_backend'),
     path('videos/<uuid:pk>/debug/frame/combined/', views.video_debug_frame_combined, name='video_debug_frame_combined'),
     path('videos/<uuid:pk>/debug/frame/smplx/', views.video_debug_frame_smplx, name='video_debug_frame_smplx'),
     path('videos/<uuid:pk>/debug/frame/smplx/progress/', views.video_debug_smplx_progress, name='video_debug_smplx_progress'),
     path('videos/<uuid:pk>/debug/frame/smplx/smooth/', views.video_debug_frame_smplx_smooth, name='video_debug_frame_smplx_smooth'),
+    path('videos/<uuid:pk>/debug/frame/phase-b/', views.video_debug_phase_b, name='video_debug_phase_b'),
     path('videos/<uuid:pk>/debug/backends/', views.video_debug_backends, name='video_debug_backends'),
 
     # Person groups
@@ -34,6 +36,7 @@ urlpatterns = [
     path('avatars/<uuid:pk>/fork/', views.avatar_fork, name='avatar_fork'),
     path('avatars/<uuid:pk>/delete/', views.avatar_delete, name='avatar_delete'),
     path('avatars/<uuid:pk>/fit/', views.avatar_fit, name='avatar_fit'),
+    path('avatars/<uuid:pk>/fit/cancel/', views.avatar_fit_cancel, name='avatar_fit_cancel'),
     path('avatars/<uuid:pk>/edit/', views.avatar_edit, name='avatar_edit'),
     path('avatars/<uuid:pk>/edit/save/', views.avatar_edit_save, name='avatar_edit_save'),
     path('avatars/<uuid:pk>/mesh.obj', views.avatar_mesh, name='avatar_mesh'),

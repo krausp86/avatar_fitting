@@ -340,93 +340,23 @@ def fit_and_render(
     glob_orient = nn.Parameter(orient_init)
     transl      = nn.Parameter(transl_init)
 
-    # Body pose split into anatomical segments so each phase optimises only
-    # the relevant joints.  Segments are reassembled into 63-dim body_pose
-    # in SMPL-X joint order inside _get_body_pose().
-    #
-    # SMPL-X body_pose layout (21 joints × 3, joints 1-21):
-    #  0: 3  left_hip     | 3: 6  right_hip    | 6: 9  spine1
-    #  9:12  left_knee    |12:15  right_knee    |15:18  spine2
-    # 18:21  left_ankle   |21:24  right_ankle   |24:27  spine3
-    # 27:30  left_foot    |30:33  right_foot    |33:36  neck
-    # 36:39  left_collar  |39:42  right_collar  |42:45  head
-    # 45:48  left_shoulder|48:51  right_shoulder
-    # 51:54  left_elbow   |54:57  right_elbow
-    # 57:60  left_wrist   |60:63  right_wrist
-    p_spine = nn.Parameter(torch.zeros(1, 12, device=device))  # spine1,spine2,spine3,neck
-    p_larm  = nn.Parameter(torch.zeros(1, 12, device=device))  # lcol,lsho,lelb,lwri
-    p_rarm  = nn.Parameter(torch.zeros(1, 12, device=device))  # rcol,rsho,relb,rwri
-    p_lhip  = nn.Parameter(torch.zeros(1,  3, device=device))  # left_hip  (separated: torso-phase)
-    p_rhip  = nn.Parameter(torch.zeros(1,  3, device=device))  # right_hip (separated: torso-phase)
-    p_lleg  = nn.Parameter(torch.zeros(1,  9, device=device))  # lkne,lank,lft
-    p_rleg  = nn.Parameter(torch.zeros(1,  9, device=device))  # rkne,rank,rft
-    p_head  = nn.Parameter(torch.zeros(1,  3, device=device))  # head
+    # Single body_pose parameter — no anatomical segments.
+    body_pose = nn.Parameter(torch.zeros(1, 63, device=device))
 
-    # Warm-start pose segments from ROMP body_pose if available.
+    # Warm-start from ROMP body_pose if available.
     # ROMP theta: (72,) = global_orient(3) | SMPL body_pose(69, joints 1-23)
     # SMPL-X body_pose uses 21 joints (63 dims) — the first 63 of SMPL's 69 match.
     if romp_init is not None:
         with torch.no_grad():
             bp = torch.tensor(romp_init['thetas'][0][3:66], dtype=torch.float32, device=device)
-            p_lhip.data.copy_(bp[0:3].unsqueeze(0))
-            p_rhip.data.copy_(bp[3:6].unsqueeze(0))
-            p_spine.data.copy_(torch.cat([bp[6:9], bp[15:18], bp[24:27], bp[33:36]]).unsqueeze(0))
-            p_lleg.data.copy_(torch.cat([bp[9:12], bp[18:21], bp[27:30]]).unsqueeze(0))
-            p_rleg.data.copy_(torch.cat([bp[12:15], bp[21:24], bp[30:33]]).unsqueeze(0))
-            p_head.data.copy_(bp[42:45].unsqueeze(0))
-            p_larm.data.copy_(torch.cat([bp[36:39], bp[45:48], bp[51:54], bp[57:60]]).unsqueeze(0))
-            p_rarm.data.copy_(torch.cat([bp[39:42], bp[48:51], bp[54:57], bp[60:63]]).unsqueeze(0))
-        log.info("single_frame_fit: pose segments initialized from ROMP")
+            body_pose.data.copy_(bp[:63].unsqueeze(0))
+        log.info("single_frame_fit: body_pose initialized from ROMP")
 
-    def _get_body_pose():
-        return torch.cat([
-            p_lhip,           # left_hip
-            p_rhip,           # right_hip
-            p_spine[:, 0:3],  # spine1
-            p_lleg[:, 0:3],   # left_knee
-            p_rleg[:, 0:3],   # right_knee
-            p_spine[:, 3:6],  # spine2
-            p_lleg[:, 3:6],   # left_ankle
-            p_rleg[:, 3:6],   # right_ankle
-            p_spine[:, 6:9],  # spine3
-            p_lleg[:, 6:9],   # left_foot
-            p_rleg[:, 6:9],   # right_foot
-            p_spine[:, 9:12], # neck
-            p_larm[:, 0:3],   # left_collar
-            p_rarm[:, 0:3],   # right_collar
-            p_head,           # head
-            p_larm[:, 3:6],   # left_shoulder
-            p_rarm[:, 3:6],   # right_shoulder
-            p_larm[:, 6:9],   # left_elbow
-            p_rarm[:, 6:9],   # right_elbow
-            p_larm[:, 9:12],  # left_wrist
-            p_rarm[:, 9:12],  # right_wrist
-        ], dim=1)
-
-    _all_segments = [p_spine, p_larm, p_rarm, p_lhip, p_rhip, p_lleg, p_rleg, p_head]
-
-    _phase_snaps: list  = []   # (label, verts_np, joints_np) — deferred rendering
-    _phase_renders: list = []  # (label, bgr_image) — filled after optimisation
-
-    def _snap(label, body_pose_override=None):
-        """Store current model state for deferred rendering (avoids blocking the optimizer)."""
-        with torch.no_grad():
-            bp = body_pose_override if body_pose_override is not None else _get_body_pose()
-            out = smplx_model(betas=beta, global_orient=glob_orient,
-                              transl=transl, body_pose=bp)
-            v = out.vertices[0].cpu().numpy().copy()
-            j = out.joints[0, _SMPLX_IDX].cpu().numpy().copy()
-        _phase_snaps.append((label, v, j))
-        log.info("snap (deferred): %s", label)
-
-    # ── Torso-centroid alignment: shift transl so projected torso joint centroid
-    # matches the observed torso keypoint centroid.  Torso points (shoulders +
-    # hips) dominate because they define the body's root position; limb joints
-    # will follow once pose is optimised.
+    # ── Torso-centroid alignment ───────────────────────────────────────────────
     _TORSO_IDX = [_COCO_IDX.index(c) for c in (5, 6, 11, 12)]  # lsho,rsho,lhip,rhip
     with torch.no_grad():
         out_c = smplx_model(betas=beta, global_orient=glob_orient,
-                            transl=transl, body_pose=torch.zeros(1, 63, device=device))
+                            transl=transl, body_pose=body_pose)
         j = out_c.joints[0]
         torso_vis = [i for i in _TORSO_IDX if kp_px[i, 2] > 0.3]
         if len(torso_vis) >= 2:
@@ -441,61 +371,11 @@ def fit_and_render(
             mdl_cy  = (proj_y * w).sum() / w.sum()
             z_now   = float(transl[0, 2].item())
             transl[0, 0] += (obs_cx - mdl_cx) * z_now / fx
-            transl[0, 1] -= (obs_cy - mdl_cy) * z_now / fy   # Y-flip
+            transl[0, 1] -= (obs_cy - mdl_cy) * z_now / fy
             log.info("torso centroid shift: Δpx=(%.1f, %.1f) → Δt=(%.3f, %.3f)",
                      obs_cx - mdl_cx, obs_cy - mdl_cy,
                      (obs_cx - mdl_cx) * z_now / fx,
                      -(obs_cy - mdl_cy) * z_now / fy)
-
-    # ── ROMP pre-visualisation ────────────────────────────────────────────────
-    # Render ROMP's predicted global_orient + body_pose before any optimisation,
-    # centroid-aligned in X/Y to the observed torso keypoints.
-    if romp_init is not None:
-        with torch.no_grad():
-            romp_go = torch.tensor(
-                romp_init['thetas'][0][0:3], dtype=torch.float32, device=device
-            ).unsqueeze(0)
-            romp_t = torch.tensor([[0.0, 0.0, z_init]], dtype=torch.float32, device=device)
-            out_r = smplx_model(betas=beta, global_orient=romp_go, transl=romp_t,
-                                body_pose=_get_body_pose())
-            j_r = out_r.joints[0]
-            torso_vis_r = [i for i in _TORSO_IDX if kp_px[i, 2] > 0.3]
-            if len(torso_vis_r) >= 2:
-                z_c  = j_r[_SMPLX_IDX, 2].clamp(min=0.1).cpu().numpy()
-                px_r = j_r[_SMPLX_IDX, 0].cpu().numpy() * fx / z_c + cx
-                py_r = -j_r[_SMPLX_IDX, 1].cpu().numpy() * fy / z_c + cy
-                w    = np.array([kp_px[i, 2] if i in torso_vis_r else 0.0
-                                 for i in range(len(_COCO_IDX))], dtype=np.float32)
-                if w.sum() > 0:
-                    romp_t[0, 0] += ((kp_px[:, 0] * w).sum() / w.sum() -
-                                     (px_r * w).sum() / w.sum()) * z_init / fx
-                    romp_t[0, 1] -= ((kp_px[:, 1] * w).sum() / w.sum() -
-                                     (py_r * w).sum() / w.sum()) * z_init / fy
-                out_r = smplx_model(betas=beta, global_orient=romp_go, transl=romp_t,
-                                    body_pose=_get_body_pose())
-            v_r  = out_r.vertices[0].cpu().numpy().copy()
-            j_r2 = out_r.joints[0, _SMPLX_IDX].cpu().numpy().copy()
-        _phase_snaps.append(('-1 ROMP raw', v_r, j_r2))
-        log.info("snap (deferred): -1 ROMP raw")
-
-    _snap('0 PnP init')
-
-    def _pose_prior():
-        return sum(p.pow(2).mean() for p in _all_segments) / len(_all_segments)
-
-    def aa_to_rotmat(aa):
-        """Axis-angle (1,3) → rotation matrix (1,3,3) via Rodrigues."""
-        angle = aa.norm(dim=-1, keepdim=True).clamp(min=1e-8)
-        axis  = aa / angle
-        c, s  = torch.cos(angle), torch.sin(angle)
-        t     = 1.0 - c
-        x, y, z = axis[:, 0], axis[:, 1], axis[:, 2]
-        R = torch.stack([
-            t*x*x+c,   t*x*y-s*z, t*x*z+s*y,
-            t*x*y+s*z, t*y*y+c,   t*y*z-s*x,
-            t*x*z-s*y, t*y*z+s*x, t*z*z+c,
-        ], dim=-1).reshape(-1, 3, 3)
-        return R
 
     def project(j3d):
         # SMPL-X is Y-up, image coords are Y-down → negate Y in projection
@@ -617,247 +497,59 @@ def fit_and_render(
     # PnP already found a good glob_orient — keep its LR LOW so joints (hips, spine)
     # are forced to express the anatomical bend rather than the optimizer just tilting
     # the entire rigid body.  Hip/spine get high LR to reach large angles (≥ π/2).
-    _leg_coco = {13, 14, 15, 16}  # knees + ankles
-    _legs_visible = any(
-        kp_px[i, 2] >= 0.25
-        for i, c in enumerate(_COCO_IDX) if c in _leg_coco
-    )
+    # ── Phase 1: orient + transl ──────────────────────────────────────────────
     _phase1_params = [
-        {'params': [transl],               'lr': 5e-3},
-        {'params': [p_spine],              'lr': 3e-2},
-        {'params': [p_larm, p_rarm],       'lr': 5e-3},
-        {'params': [p_head],               'lr': 5e-3},
+        {'params': [transl],    'lr': 5e-3},
+        {'params': [body_pose], 'lr': 5e-3},
     ]
     if romp_init is None:
-        # No ROMP: allow Phase 1 to correct PnP orientation
         _phase1_params.append({'params': [glob_orient], 'lr': 1e-3})
-    if _legs_visible:
-        # Knees/ankles detected — allow hip flexion and leg pose in Phase 1
-        _phase1_params.append({'params': [p_lhip, p_rhip], 'lr': 3e-2})
-        _phase1_params.append({'params': [p_lleg, p_rleg], 'lr': 5e-3})
-    # else: hips + legs frozen in Phase 1 — Torso phase handles hips with proper constraints
     opt1 = torch.optim.Adam(_phase1_params)
     sched1 = torch.optim.lr_scheduler.CosineAnnealingLR(opt1, T_max=n_orient_epochs, eta_min=1e-4)
+    loss = torch.zeros(1, device=device)
     for ep in range(n_orient_epochs):
         opt1.zero_grad()
         out = smplx_model(betas=beta, global_orient=glob_orient,
-                          transl=transl, body_pose=_get_body_pose())
+                          transl=transl, body_pose=body_pose)
         j2d = project(out.joints[0, _SMPLX_IDX])
-        loss = (kp_loss(j2d, kp) + 0.5 * scale_loss(j2d)
-                + 1.0 * lr_order_loss(j2d) + 10.0 * chirality_loss(j2d))
+        loss = (kp_loss(j2d, kp)
+                + 0.5  * scale_loss(j2d)
+                + 1.0  * lr_order_loss(j2d)
+                + 10.0 * chirality_loss(j2d)
+                + 0.001 * body_pose.pow(2).mean())
         loss.backward()
         opt1.step()
         sched1.step()
-        _report('Orient + Transl', ep, n_orient_epochs, ep, loss)
-        if ep % 50 == 0:
-            log.debug("phase1 ep=%d loss=%.4f transl_z=%.3f", ep, loss.item(),
-                      transl.detach().cpu()[0, 2])
+        _report('Phase 1', ep, n_orient_epochs, ep, loss)
 
-    _snap('1 Phase1 orient+transl')
+    log.info("Phase 1 done: loss=%.4f transl_z=%.3f", loss.item(), transl.detach().cpu()[0, 2])
 
-    # Back-project 2D keypoints to 3D using the fitted depth.
-    # With known Z (= pelvis depth from Phase 1), each 2D point maps to
-    # exactly one 3D position — no depth ambiguity.  All joints land in the
-    # frontal plane (Z = transl_z), which is a valid assumption for a person
-    # facing the camera at typical distances (0.3–5 m).
-    with torch.no_grad():
-        z_body = transl[0, 2].item()
-
-    kp_3d_np = np.zeros((len(_COCO_IDX), 4), dtype=np.float32)  # (x,y,z,vis)
-    for i in range(len(_COCO_IDX)):
-        vis = kp_px[i, 2]
-        kp_3d_np[i, 3] = vis
-        if vis > 0.1:
-            kp_3d_np[i, 0] =  (kp_px[i, 0] - cx) * z_body / fx   # X
-            kp_3d_np[i, 1] = -(kp_px[i, 1] - cy) * z_body / fy   # Y (Y-flip)
-            kp_3d_np[i, 2] =  z_body                               # Z fixed
-
-    kp_3d = torch.tensor(kp_3d_np, dtype=torch.float32, device=device)
-    log.info("single_frame_fit: back-projected 3D targets at z=%.3f m", z_body)
-
-    def kp_loss_3d(joints_world):
-        """3D keypoint loss — no depth ambiguity."""
-        vis = kp_3d[:, 3:4]
-        return ((joints_world - kp_3d[:, :3]) ** 2 * vis).mean()
-
-    pose_prior_w = 0.001   # low — extreme poses (bent over 90°) need large joint angles
-
-    # COCO index sets per body region (for masked keypoint loss)
-    _TORSO_COCO = {5, 6, 11, 12}
-    _LARM_COCO  = {5, 7, 9}
-    _RARM_COCO  = {6, 8, 10}
-    _LLEG_COCO  = {11, 13, 15}
-    _RLEG_COCO  = {12, 14, 16}
-
-    def kp_loss_3d_masked(joints_world, coco_set):
-        """kp_loss_3d restricted to a subset of COCO keypoints."""
-        vis = kp_3d[:, 3:4].clone()
-        for i, coco_idx in enumerate(_COCO_IDX):
-            if coco_idx not in coco_set:
-                vis[i] = 0.0
-        return ((joints_world - kp_3d[:, :3]) ** 2 * vis).mean()
-
-    def kp_loss_2d_masked(j2d, coco_set):
-        """2D reprojection loss restricted to a subset of COCO keypoints.
-        Uses the observed pixel positions directly — no flat-Z assumption,
-        works correctly for bent-over / non-frontal poses."""
-        w = torch.tensor(
-            [kp_px[i, 2] if _COCO_IDX[i] in coco_set else 0.0
-             for i in range(len(_COCO_IDX))],
-            dtype=torch.float32, device=device).unsqueeze(1)
-        obs = torch.tensor(kp_px[:, :2], dtype=torch.float32, device=device)
-        return ((j2d - obs) ** 2 * w).mean()
-
-    z_anchor = z_body   # depth established in Phase 1 — must not drift
-
-    # Arm gravity prior — pixel space, scale-independent.
-    # For a standing person in any bend, hanging arms have elbow BELOW shoulder in image-Y.
-    # Uses expected projected drop (~70% of arm length) as target.
-    # Normalised by arm_len_px² → loss ≈ 0..1 regardless of camera distance.
-    # Weighted inversely by visibility: full weight when joint is not detected.
-    _arm_len_px = float(fy) * 0.33 / max(float(z_body), 0.5)  # projected upper-arm length
-
-    def arm_gravity_prior(j2d):
-        """Arm gravity in pixel space. Elbow should be ~70% arm-length below shoulder
-        (image Y-down), wrist similarly below elbow. Loss ≈ 0..1, scale-independent.
-        Only active when distal keypoint is not well detected (vis < 0.5)."""
-        total = torch.zeros(1, device=device)
-        for prox_i, dist_i, kp_i in [(0,2,2),(1,3,3),(2,4,4),(3,5,5)]:
-            vis = float(kp_px[kp_i, 2])
-            if vis < 0.5:
-                w = (0.5 - vis) / 0.5   # 1.0 when undetected
-                expected_drop = _arm_len_px * 0.7
-                actual_drop   = j2d[dist_i, 1] - j2d[prox_i, 1]   # +ve = lower in image
-                shortfall = expected_drop - actual_drop             # +ve when arm is too high
-                total = total + w * torch.relu(shortfall) ** 2
-        return total / (_arm_len_px ** 2 + 1.0)   # normalise → ~0..1
-
-    def _run_phase(name, params, coco_set, n_ep, ep_offset, lr=5e-3,
-                   use_winding=False, extra_loss_fn=None, orient_lr=None):
-        """Run one sequential fitting phase.
-
-        transl is never included in `params` for limb phases — only the
-        torso phase may touch transl, and even then Z is soft-anchored.
-        use_winding=True adds the torso winding constraint.
-        extra_loss_fn(j2d) is an optional additional loss term (pixel space).
-        orient_lr: if set, adds glob_orient as a separate param group with this LR.
-        """
-        param_groups = [{'params': params, 'lr': lr}]
-        if orient_lr is not None:
-            param_groups.append({'params': [glob_orient], 'lr': orient_lr})
-        opt  = torch.optim.Adam(param_groups)
-        sch  = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=max(n_ep, 1), eta_min=1e-4)
-        loss = torch.zeros(1, device=device)
-        for ep in range(n_ep):
-            opt.zero_grad()
-            out = smplx_model(betas=beta, global_orient=glob_orient,
-                              transl=transl, body_pose=_get_body_pose())
-            j3d = out.joints[0, _SMPLX_IDX]
-            j2d = project(j3d)
-            z_anchor_loss = (transl[0, 2] - z_anchor) ** 2
-            loss = (kp_loss_2d_masked(j2d, coco_set)
-                    + 5.0          * z_anchor_loss
-                    + pose_prior_w * _pose_prior()
-                    + 1.0          * lr_order_loss(j2d)
-                    + (10.0        * chirality_loss(j2d) if use_winding else 0.0)
-                    + (20.0        * extra_loss_fn(j2d)  if extra_loss_fn else 0.0)
-                    + (100.0       * _sil_loss_cpu(out)   if _sil_gt_cpu is not None else 0.0)
-                    + 0.3          * scale_loss(j2d))
-            loss.backward()
-            opt.step()
-            sch.step()
-            _report(name, ep, n_ep, ep_offset + ep, loss)
-        log.debug("%s done: loss=%.5f  transl_z=%.2f", name, float(loss.item()),
-                  transl.detach().cpu()[0, 2].item())
-        return loss
-
-    # Per-phase epoch budget
-    _ep = n_pose_epochs
-    n_torso = max(10, _ep * 25 // 100)   # 25 %
-    n_arm   = max(10, _ep * 12 // 100)   # 12 % each arm
-    n_leg   = max(10, _ep * 13 // 100)   # 13 % each leg
-    n_final = max(10, _ep - n_torso - 2*n_arm - 2*n_leg)  # ~25 %
-
-    # Visibility helper: max visibility of a set of distal COCO keypoints.
-    # A limb phase is only useful if its distal joints are actually detected.
-    def _distal_vis(*coco_indices) -> float:
-        return max(
-            (float(kp_px[_COCO_IDX.index(c), 2]) for c in coco_indices if c in _COCO_IDX),
-            default=0.0,
-        )
-
-    _VIS_THRESHOLD = 0.25   # below this → skip the phase entirely
-
-    ep_off = n_orient_epochs
-    # Phase 2a: torso — always runs (hips+shoulders are the most reliably visible)
-    _run_phase('Torso',     [transl, p_spine, p_lhip, p_rhip],
-                            _TORSO_COCO,
-                            n_torso, ep_off, lr=3e-2)
-    ep_off += n_torso
-    _snap('2 Torso')
-
-    # Phase 2b/c: arms — only if elbow OR wrist is actually visible
-    if _distal_vis(7, 9) >= _VIS_THRESHOLD:   # left elbow or wrist
-        _run_phase('Left arm',  [p_larm],  _LARM_COCO,  n_arm, ep_off, lr=2e-2,
-                   extra_loss_fn=arm_gravity_prior)
-        log.info("phase Left arm: ran (vis=%.2f)", _distal_vis(7, 9))
-    else:
-        log.info("phase Left arm: skipped (distal vis=%.2f < %.2f)", _distal_vis(7, 9), _VIS_THRESHOLD)
-    ep_off += n_arm
-    _snap('3 Left arm')
-
-    if _distal_vis(8, 10) >= _VIS_THRESHOLD:  # right elbow or wrist
-        _run_phase('Right arm', [p_rarm],  _RARM_COCO,  n_arm, ep_off, lr=2e-2,
-                   extra_loss_fn=arm_gravity_prior)
-        log.info("phase Right arm: ran (vis=%.2f)", _distal_vis(8, 10))
-    else:
-        log.info("phase Right arm: skipped (distal vis=%.2f < %.2f)", _distal_vis(8, 10), _VIS_THRESHOLD)
-    ep_off += n_arm
-    _snap('4 Right arm')
-
-    # Phase 2d/e: legs — only if knee OR ankle is actually visible
-    if _distal_vis(13, 15) >= _VIS_THRESHOLD:  # left knee or ankle
-        _run_phase('Left leg',  [p_lleg],  _LLEG_COCO,  n_leg, ep_off, lr=2e-2)
-        log.info("phase Left leg: ran (vis=%.2f)", _distal_vis(13, 15))
-    else:
-        log.info("phase Left leg: skipped (distal vis=%.2f < %.2f)", _distal_vis(13, 15), _VIS_THRESHOLD)
-    ep_off += n_leg
-    _snap('5 Left leg')
-
-    if _distal_vis(14, 16) >= _VIS_THRESHOLD:  # right knee or ankle
-        _run_phase('Right leg', [p_rleg],  _RLEG_COCO,  n_leg, ep_off, lr=2e-2)
-        log.info("phase Right leg: ran (vis=%.2f)", _distal_vis(14, 16))
-    else:
-        log.info("phase Right leg: skipped (distal vis=%.2f < %.2f)", _distal_vis(14, 16), _VIS_THRESHOLD)
-    ep_off += n_leg
-    _snap('6 Right leg')
-    # Phase 2f: light all-joint refinement — glob_orient & transl frozen,
-    # only segments tuned.  VPoser removed: it encoded wrong poses into a
-    # "plausible nearby" latent and undid the segment-phase work.
-    opt_f = torch.optim.Adam(_all_segments, lr=5e-4)
-    sch_f = torch.optim.lr_scheduler.CosineAnnealingLR(opt_f, T_max=max(n_final, 1), eta_min=1e-5)
-    loss  = torch.zeros(1, device=device)
-    for ep in range(n_final):
-        opt_f.zero_grad()
+    # ── Phase 2: full body pose ────────────────────────────────────────────────
+    opt2 = torch.optim.Adam([
+        {'params': [body_pose],   'lr': 1e-2},
+        {'params': [glob_orient], 'lr': 5e-4},
+        {'params': [transl],      'lr': 2e-3},
+    ])
+    sched2 = torch.optim.lr_scheduler.CosineAnnealingLR(opt2, T_max=n_pose_epochs, eta_min=1e-5)
+    for ep in range(n_pose_epochs):
+        opt2.zero_grad()
         out = smplx_model(betas=beta, global_orient=glob_orient,
-                          transl=transl, body_pose=_get_body_pose())
+                          transl=transl, body_pose=body_pose)
         j2d = project(out.joints[0, _SMPLX_IDX])
         loss = (kp_loss(j2d, kp)
-                + 1.0          * lr_order_loss(j2d)
-                + 0.3          * scale_loss(j2d)
-                + pose_prior_w * _pose_prior())
+                + 0.5   * scale_loss(j2d)
+                + 1.0   * lr_order_loss(j2d)
+                + 0.001 * body_pose.pow(2).mean()
+                + (100.0 * _sil_loss_cpu(out) if _sil_gt_cpu is not None else 0.0))
         loss.backward()
-        opt_f.step()
-        sch_f.step()
-        _report('Joint refine', ep, n_final, ep_off + ep, loss)
-
-    _snap('7 Joint refine')
+        opt2.step()
+        sched2.step()
+        _report('Phase 2', ep, n_pose_epochs, n_orient_epochs + ep, loss)
 
     final_loss = float(loss.item()) if loss.numel() == 1 else 0.0
     log.info("single_frame_fit done: loss=%.5f depth=%.3fm", final_loss,
              transl.detach().cpu()[0, 2])
 
-    # Signal rendering phase so the UI doesn't appear hung
     if progress_cb:
         progress_cb({
             'phase':       'Rendering',
@@ -870,26 +562,19 @@ def fit_and_render(
 
     with torch.no_grad():
         out_f = smplx_model(betas=beta, global_orient=glob_orient,
-                            transl=transl, body_pose=_get_body_pose())
+                            transl=transl, body_pose=body_pose)
         verts  = out_f.vertices[0].cpu().numpy()
         joints = out_f.joints[0, _SMPLX_IDX].cpu().numpy()
 
-    faces = smplx_model.faces  # (F, 3) numpy int32
-
-    # Render all deferred snaps now (after optimization — no longer blocks epoch reporting)
-    for snap_label, snap_v, snap_j in _phase_snaps:
-        img = _render_overlay(frame_bgr, snap_v, faces, snap_j, kp_px, fx, fy, cx, cy)
-        _phase_renders.append((snap_label, img))
-        log.info("snap rendered: %s", snap_label)
+    faces = smplx_model.faces
 
     rendered = _render_overlay(frame_bgr, verts, faces, joints, kp_px,
                                fx, fy, cx, cy)
     depth_m = round(float(transl.detach().cpu()[0, 2]), 3)
 
-    # Capture fitted parameters before releasing GPU tensors.
     pose_params = {
         'source':        'smplx',
-        'body_pose':     _get_body_pose().detach().cpu().numpy()[0].tolist(),
+        'body_pose':     body_pose.detach().cpu().numpy()[0].tolist(),
         'global_orient': glob_orient.detach().cpu().numpy()[0].tolist(),
         'transl':        transl.detach().cpu().numpy()[0].tolist(),
         'betas':         beta.detach().cpu().numpy()[0].tolist(),
@@ -897,18 +582,16 @@ def fit_and_render(
         'fx': fx, 'fy': fy, 'cx': cx, 'cy': cy,
     }
 
-    # Release GPU memory held by the optimizer and intermediate tensors.
-    del glob_orient, transl, opt_f, p_spine, p_larm, p_rarm, p_lhip, p_rhip, p_lleg, p_rleg, p_head
+    del glob_orient, transl, body_pose, opt2
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
     return rendered, {
-        'kp_loss':       round(final_loss, 5),
-        'depth_m':       depth_m,
-        'n_visible':     n_visible,
-        'epochs':        n_orient_epochs + n_pose_epochs,
-        'phase_renders': _phase_renders,  # [(label, bgr), ...]
-        'pose_params':   pose_params,
+        'kp_loss':     round(final_loss, 5),
+        'depth_m':     depth_m,
+        'n_visible':   n_visible,
+        'epochs':      n_orient_epochs + n_pose_epochs,
+        'pose_params': pose_params,
     }
 
 

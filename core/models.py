@@ -176,16 +176,38 @@ class PersonFrameKeypoints(models.Model):
 
 
 class PersonFramePose(models.Model):
-    """Per-frame SMPL-X pose parameters from Stage 1 fitting, with Savitzky-Golay smoothed variants."""
+    """Per-frame SMPL-X pose parameters, including face expression and hand pose."""
     id                   = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
     person               = models.ForeignKey(DetectedPerson, on_delete=models.CASCADE, related_name='frame_poses')
     frame_idx            = models.IntegerField()
+
+    # Body pose (fit_smplx Phase B)
     body_pose            = models.JSONField(default=list)   # 63 floats (axis-angle)
     global_orient        = models.JSONField(default=list)   # 3 floats
     transl               = models.JSONField(default=list)   # 3 floats
-    body_pose_smooth     = models.JSONField(default=list)   # Savitzky-Golay smoothed
-    global_orient_smooth = models.JSONField(default=list)
-    transl_smooth        = models.JSONField(default=list)
+
+    # Face + Expression (FLAME, SMPL-X)
+    expression           = models.JSONField(default=list)   # 10 floats (FLAME expression coefficients)
+    jaw_pose             = models.JSONField(default=list)   # 3 floats (jaw articulation)
+
+    # Hand pose (MANO PCA, 12 components each)
+    left_hand_pose       = models.JSONField(default=list)   # 12 floats (PCA coefficients)
+    right_hand_pose      = models.JSONField(default=list)   # 12 floats
+
+    # Per-frame weak-perspective camera (Phase B)
+    cam_scale            = models.FloatField(null=True, blank=True)
+    cam_tx               = models.FloatField(null=True, blank=True)
+    cam_ty               = models.FloatField(null=True, blank=True)
+
+    # Savitzky-Golay smoothed variants
+    body_pose_smooth        = models.JSONField(default=list)
+    global_orient_smooth    = models.JSONField(default=list)
+    transl_smooth           = models.JSONField(default=list)
+    expression_smooth       = models.JSONField(default=list)
+    jaw_pose_smooth         = models.JSONField(default=list)
+    left_hand_pose_smooth   = models.JSONField(default=list)
+    right_hand_pose_smooth  = models.JSONField(default=list)
+
     created_at           = models.DateTimeField(auto_now_add=True)
 
     class Meta:

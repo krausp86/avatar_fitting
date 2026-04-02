@@ -49,8 +49,20 @@ RUN pip install --no-build-isolation chumpy \
     && pip install "setuptools>=65,<71" \
     && pip install "numpy==1.26.4"
 
+# ── SMPL-X package (für SMPLer-X Backend) ─────────────────────────────────────
+RUN pip install "smplx[all]>=0.1.28"
+
+# ── 4D-Humans / HMR2 (expressive body init) ──────────────────────────────────
+# Gibt SMPL-Parameter zurück; body_pose wird auf SMPL-X (21 Gelenke) gemappt.
+# Weights werden beim ersten Aufruf automatisch von HuggingFace geladen.
+RUN pip install --no-build-isolation git+https://github.com/shubham-goel/4D-Humans \
+    && pip install scipy \
+    && pip install "numpy==1.26.4"
+
 WORKDIR /app
 COPY . .
 
+COPY download_weights.py /app/download_weights.py
+
 EXPOSE 8001
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8001"]
+CMD ["sh", "-c", "python /app/download_weights.py && uvicorn main:app --host 0.0.0.0 --port 8001"]

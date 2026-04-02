@@ -13,7 +13,7 @@ import numpy as np
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
-from backends import ALL_BACKENDS, BACKEND_BY_ID, MediaPipeBackend, RTMPoseBackend, ViTPoseBackend, draw_combined
+from backends import ALL_BACKENDS, BACKEND_BY_ID, MediaPipeBackend, RTMPoseBackend, ViTPoseBackend, SMPLerXBackend, HMR2Backend, draw_combined
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)-8s %(name)s %(message)s')
@@ -112,6 +112,64 @@ def analyze(req: AnalyzeRequest):
     except Exception as e:
         log.exception("analyze failed: backend=%s", req.backend)
         raise HTTPException(500, str(e))
+
+
+class SMPLXRegressRequest(BaseModel):
+    frame_b64: str    # base64-encoded JPEG/PNG (BGR)
+
+
+@app.post("/smplx/regress")
+def smplx_regress(req: SMPLXRegressRequest):
+    """
+    Führt SMPLer-X Regression durch und gibt SMPL-X Parameter zurück.
+    Benötigt SMPLer-X Weights in /data/models/smpler_x/.
+    """
+    if not SMPLerXBackend.available:
+        raise HTTPException(503, "SMPLer-X not available (missing mmpose or smplx package)")
+
+    try:
+        frame = _decode_frame(req.frame_b64)
+    except Exception as e:
+        raise HTTPException(400, f"Frame decode error: {e}")
+
+    try:
+        params = SMPLerXBackend.regress(frame)
+    except Exception as e:
+        log.exception("smplx_regress failed")
+        # After a load failure _get_model sets available=False — return 503 so
+        # callers treat this as "permanently unavailable" and stop retrying.
+        if not SMPLerXBackend.available:
+            raise HTTPException(503, f"SMPLer-X not available: {e}")
+        raise HTTPException(500, str(e))
+
+    if params is None:
+        return {"detection": False, "params": None}
+
+    return {"detection": True, "params": params}
+
+
+@app.post("/hmr2/regress")
+def hmr2_regress(req: SMPLXRegressRequest):
+    """HMR2 (4D-Humans) body regression → SMPL-X compatible params."""
+    if not HMR2Backend.available:
+        raise HTTPException(503, "HMR2 not available (pip install 4D-Humans)")
+
+    try:
+        frame = _decode_frame(req.frame_b64)
+    except Exception as e:
+        raise HTTPException(400, f"Frame decode error: {e}")
+
+    try:
+        params = HMR2Backend.regress(frame)
+    except Exception as e:
+        log.exception("hmr2_regress failed")
+        if not HMR2Backend.available:
+            raise HTTPException(503, f"HMR2 not available: {e}")
+        raise HTTPException(500, str(e))
+
+    if params is None:
+        return {"detection": False, "params": None}
+    return {"detection": True, "params": params}
 
 
 @app.post("/analyze/combined")
