@@ -1,3 +1,7 @@
+# docker-compose.gpu.yml
+# Redundant on this machine – GPU is now the default via docker-compose.override.yml.
+# Kept for compatibility; identical to the override.
+
 services:
   web:
     build:

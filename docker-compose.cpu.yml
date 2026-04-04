@@ -1,0 +1,9 @@
+# docker-compose.cpu.yml
+# CPU-only override – use on machines without NVIDIA GPU.
+#
+# Usage: docker compose -f docker-compose.yml -f docker-compose.cpu.yml up
+
+services:
+  web:
+    build:
+      dockerfile: Dockerfile.cpu

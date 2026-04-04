@@ -146,6 +146,20 @@
     </div>
     {% endif %}
 
+    <!-- Fit-Qualität -->
+    {% if fitting_meta %}
+    <div class="card" id="fitQualityCard">
+      <div class="card-header" style="display:flex;align-items:center;justify-content:space-between">
+        <span>Fit-Qualität (SMPL-X Overlay)</span>
+        <button class="btn btn-ghost btn-sm" onclick="loadFitQuality()" id="fitQualityBtn">Laden</button>
+      </div>
+      <div id="fitQualityBody" style="display:none;padding:6px">
+        <div id="fitQualityGrid" style="display:grid;grid-template-columns:repeat(4,1fr);gap:4px"></div>
+        <p id="fitQualityStatus" class="text-sm text-muted" style="margin:8px 6px 4px"></p>
+      </div>
+    </div>
+    {% endif %}
+
     <!-- Edits -->
     {% if edits %}
     <div class="card">
@@ -530,6 +544,50 @@ async function rebuildMesh() {
     status.style.color = '#e74c3c';
     status.textContent = '✗ ' + e.message;
     btn.textContent = '⟳ Mesh generieren';
+    btn.disabled = false;
+  }
+}
+
+async function loadFitQuality() {
+  const btn    = document.getElementById('fitQualityBtn');
+  const body   = document.getElementById('fitQualityBody');
+  const grid   = document.getElementById('fitQualityGrid');
+  const status = document.getElementById('fitQualityStatus');
+
+  btn.disabled = true;
+  btn.textContent = 'Lädt…';
+  body.style.display = 'block';
+  grid.innerHTML = '';
+  status.textContent = 'Rendert SMPL-X Overlays…';
+
+  try {
+    const resp = await fetch(`/api/avatar/{{ avatar.pk }}/fit-quality/?n=12`);
+    if (!resp.ok) {
+      const err = await resp.json();
+      status.textContent = '✗ ' + (err.error || resp.statusText);
+      return;
+    }
+    const data = await resp.json();
+    grid.innerHTML = '';
+    for (const f of data.frames) {
+      const wrap = document.createElement('div');
+      wrap.style.cssText = 'position:relative;font-size:0';
+      const img = document.createElement('img');
+      img.src = f.render;
+      img.style.cssText = 'width:100%;border-radius:3px';
+      const label = document.createElement('span');
+      label.textContent = `#${f.frame_idx}`;
+      label.style.cssText = 'position:absolute;bottom:3px;left:4px;font-size:10px;color:#fff;text-shadow:0 1px 2px #000;font-family:monospace';
+      wrap.appendChild(img);
+      wrap.appendChild(label);
+      grid.appendChild(wrap);
+    }
+    status.textContent = `${data.frames.length} von ${data.total_poses} Frames gerendert`;
+    btn.textContent = '⟳ Neu laden';
+  } catch (e) {
+    status.textContent = '✗ ' + e.message;
+    btn.textContent = 'Laden';
+  } finally {
     btn.disabled = false;
   }
 }

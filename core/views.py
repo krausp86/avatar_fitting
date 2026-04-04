@@ -14,7 +14,7 @@ _debug_pose_cache: dict = {}
 
 from django.shortcuts import render, get_object_or_404, redirect, aget_object_or_404
 from django.http import JsonResponse
-from django.views.decorators.http import require_POST
+from django.views.decorators.http import require_POST, require_GET
 from django.conf import settings
 from django.utils import timezone
 from django.db.models import Count, Max
@@ -57,6 +57,22 @@ def scan_videos(request):
     folder = request.POST.get('folder', settings.VIDEO_SCAN_ROOT)
     added  = scan_video_folder(folder)
     return JsonResponse({'added': added, 'folder': folder})
+
+
+@require_POST
+def refresh_video_metadata(request):
+    """Re-run _populate_metadata on all videos that have missing fps/duration/resolution."""
+    from .scanner import _populate_metadata
+    qs = VideoSource.objects.filter(
+        fps__isnull=True
+    ) | VideoSource.objects.filter(
+        resolution=''
+    )
+    updated = 0
+    for vs in qs.distinct():
+        _populate_metadata(vs)
+        updated += 1
+    return JsonResponse({'updated': updated})
 
 
 @require_POST
@@ -768,6 +784,105 @@ async def video_debug_phase_b(request, pk):
     })
 
 
+@require_GET
+async def avatar_fit_quality(request, pk):
+    """
+    Rendert N gleichmäßig verteilte Phase-B-Frames mit SMPL-X-Overlay.
+    GET /api/avatar/<pk>/fit-quality/?n=12
+    Gibt JSON: { frames: [{frame_idx, person_id, loss_body, render: 'data:image/jpeg;base64,...'}, ...] }
+    """
+    import asyncio
+    from asgiref.sync import sync_to_async
+    from .models import PersonFramePose, PersonShape, PersonFrameKeypoints
+    from .fitting.single_frame_fit import render_smplx_from_params, _COCO_IDX
+
+    n_samples = min(int(request.GET.get('n', 12)), 24)
+
+    avatar = await aget_object_or_404(Avatar, pk=pk)
+    if not avatar.group_id:
+        return JsonResponse({'error': 'Avatar hat keine PersonGroup'}, status=400)
+
+    # Betas aus PersonShape
+    betas = await sync_to_async(
+        lambda: next(
+            iter(PersonShape.objects.filter(group_id=avatar.group_id)
+                 .values_list('betas', flat=True)[:1]),
+            [0.0] * 10,
+        )
+    )()
+
+    # Alle PersonFramePose-Rows für diese Gruppe, nach frame_idx sortiert
+    # PersonGroup.persons ist M2M → Lookup über person__groups
+    all_poses = await sync_to_async(
+        lambda: list(
+            PersonFramePose.objects
+            .filter(person__groups=avatar.group_id)
+            .order_by('frame_idx')
+            .values('id', 'person_id', 'frame_idx',
+                    'body_pose', 'global_orient', 'transl',
+                    'cam_scale', 'cam_tx', 'cam_ty',
+                    'person__video__path')
+        )
+    )()
+
+    if not all_poses:
+        return JsonResponse({'error': 'Keine Phase-B-Daten vorhanden – bitte zuerst Stage 1 ausführen'}, status=404)
+
+    # Gleichmäßige Auswahl
+    step = max(1, len(all_poses) // n_samples)
+    sampled = all_poses[::step][:n_samples]
+
+    async def _render_one(row: dict) -> dict:
+        person_id  = row['person_id']
+        frame_idx  = row['frame_idx']
+        video_path = row.get('person__video__path')
+
+        if not video_path or not os.path.exists(video_path):
+            return None
+
+        frame_bgr, _, _, _ = await asyncio.to_thread(_read_video_frame, video_path, str(frame_idx))
+        H, W = frame_bgr.shape[:2]
+
+        # Keypoints für Overlay
+        kp_row = await sync_to_async(
+            lambda: PersonFrameKeypoints.objects.filter(
+                person_id=person_id, frame_idx=frame_idx
+            ).values('body_landmarks').first()
+        )()
+        kp_px = []
+        if kp_row and kp_row.get('body_landmarks'):
+            lm_map = {d['idx']: d for d in kp_row['body_landmarks']}
+            for coco_idx in _COCO_IDX:
+                d = lm_map.get(coco_idx)
+                kp_px.append([d['x'] * W, d['y'] * H, d['visibility']] if d else [0., 0., 0.])
+
+        # Kamera
+        cam_scale = row.get('cam_scale') or 0
+        if cam_scale > 0:
+            fx = fy = float(cam_scale) * max(W, H)
+            cx = W / 2.0 + (row.get('cam_tx') or 0.0) * fx
+            cy = H / 2.0 + (row.get('cam_ty') or 0.0) * fy
+        else:
+            fx = fy = max(W, H) * 1.2
+            cx, cy  = W / 2.0, H / 2.0
+
+        rendered = await asyncio.to_thread(
+            render_smplx_from_params,
+            frame_bgr, row['body_pose'], row['global_orient'], row['transl'],
+            betas, kp_px, fx, fy, cx, cy,
+        )
+        return {
+            'frame_idx': frame_idx,
+            'person_id': str(person_id),
+            'render':    _frame_to_b64(rendered, quality=82),
+        }
+
+    rendered_frames = await asyncio.gather(*[_render_one(r) for r in sampled])
+    frames = [f for f in rendered_frames if f is not None]
+
+    return JsonResponse({'frames': frames, 'total_poses': len(all_poses)})
+
+
 # ─── Persons ─────────────────────────────────────────────────────────────────
 
 def person_list(request):
@@ -1350,10 +1465,10 @@ def avatar_log(request, pk):
             if e.get('note'):
                 # Human-readable milestone message — show prominently
                 lines.append({'source': 'job', 'ts': '', 'msg': f'  ▶ {e["note"]}'})
-            elif e.get('loss') is not None and e.get('epoch', 0) % 50 == 0:
-                # Show every 50th epoch to avoid flooding the log
+            elif e.get('loss') is not None and e.get('epoch', 0) % 10 == 0:
+                # Show every 10th epoch/frame to give timely feedback
                 lines.append({'source': 'job', 'ts': '',
-                              'msg': f"  ep {e.get('epoch',''):>4}  loss={e.get('loss', 0):.5f}"})
+                              'msg': f"  ep {e.get('epoch',''):>4}  loss={e.get('loss', 0):.2f}"})
         if latest.error:
             lines.append({'source': 'job', 'ts': '', 'msg': f'❌ {latest.error}'})
 

@@ -8,6 +8,9 @@
 <button class="btn btn-secondary btn-sm" onclick="document.getElementById('scanModal').style.display='flex'">
   ⟳ Ordner scannen
 </button>
+<button class="btn btn-ghost btn-sm" id="btnRefreshMeta" onclick="refreshMetadata()">
+  ↺ Metadaten aktualisieren
+</button>
 {% endblock %}
 
 {% block content %}
@@ -97,6 +100,19 @@ function filterFolder(folder, btn) {
   document.querySelectorAll('tr[data-folder]').forEach(row => {
     row.style.display = (folder === 'all' || row.dataset.folder === folder) ? '' : 'none';
   });
+}
+
+async function refreshMetadata() {
+  const btn = document.getElementById('btnRefreshMeta');
+  btn.textContent = '…';
+  btn.disabled = true;
+  const r = await post('{% url "refresh_video_metadata" %}', {});
+  const d = await r.json();
+  btn.textContent = `↺ Metadaten aktualisieren`;
+  btn.disabled = false;
+  if (d.updated > 0) {
+    setTimeout(() => location.reload(), 300);
+  }
 }
 
 async function doScan() {

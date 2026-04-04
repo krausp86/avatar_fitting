@@ -19,16 +19,19 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     environment:
-      - MEDIAPIPE_DISABLE_GPU=1
       - HOME=/tmp
       - PYOPENGL_PLATFORM=egl
       - DISPLAY=
       - MIM_HOME=/data/models
       - TORCH_HOME=/data/models
+      - SMPLX_MODEL_DIR=/data/models
+      - VPOSER_MODEL_DIR=/data/models/V02_05
     volumes:
       - ${MODELS_DIR:-./models}:/data/models
+      - ${VIDEO_FOLDER:-./video_data}:/data/videos:ro
+      - ./pose_worker:/app:cached   # live code reload – no rebuild needed for .py changes
     healthcheck:
-      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health')"]
+      test: ["CMD", "curl", "-sf", "http://localhost:8001/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -74,14 +77,14 @@ services:
       - media_data:/data/media
       - ${VIDEO_FOLDER:-./video_data}:/data/videos:ro   # read-only video source
       # Model weights (not in git – download separately, see models/smplx/.gitkeep)
-      - ${MODELS_DIR:-./models}:/data/models:ro
+      - ${MODELS_DIR:-./models}:/data/models
       # Live code reload in development
       - .:/app:cached
     ports:
       - "${PORT:-8006}:8000"
     command: >
-      sh -c "python manage.py migrate --noinput &&
-             (python manage.py createsuperuser --noinput 2>/dev/null || true) &&
+      sh -c "python3 manage.py migrate --noinput &&
+             (python3 manage.py createsuperuser --noinput 2>/dev/null || true) &&
              daphne -b 0.0.0.0 -p 8000 --websocket_timeout 3600 avatar_system.asgi:application"
   # ── Celery worker (optional – for async fitting jobs) ──────────────────────
   # Uncomment when you replace threading.Thread in tasks.py with Celery

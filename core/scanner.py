@@ -121,30 +121,87 @@ def _populate_metadata(vs: VideoSource):
 
 def detect_persons_for_video(vs: VideoSource) -> int:
     """
-    Run person detection on *vs* and create DetectedPerson records.
+    Run GPU-based person detection on *vs* via the pose-worker and create
+    DetectedPerson records.
 
     Safe to call multiple times – existing tracks for this video are
     deleted first so results stay consistent with the current detector.
 
     Returns the number of new DetectedPerson records created.
     """
-    from django.conf import settings
-    from .detection.person_detector import detect_persons_in_video
+    import base64
+    import httpx
+    import numpy as np
+
+    POSE_WORKER_URL = os.environ.get("POSE_WORKER_URL", "http://pose-worker:8001")
 
     # Remove stale detections from a previous run
     DetectedPerson.objects.filter(video=vs).delete()
+
+    log.info("detect_persons_for_video: calling pose-worker for %s", vs.path)
+    try:
+        resp = httpx.post(
+            f"{POSE_WORKER_URL}/detect/video",
+            json={"video_path": vs.path},
+            timeout=3600.0,
+        )
+        resp.raise_for_status()
+    except httpx.HTTPStatusError as e:
+        if e.response.status_code == 503:
+            # ViTPose not available – fall back to local MediaPipe CPU
+            log.warning("pose-worker /detect/video unavailable (503), falling back to local MediaPipe")
+            return _detect_persons_local(vs)
+        raise
+    except Exception as e:
+        log.warning("pose-worker /detect/video failed (%s), falling back to local MediaPipe", e)
+        return _detect_persons_local(vs)
+
+    tracks = resp.json().get("tracks", [])
+    created = 0
+    for t in tracks:
+        dp = DetectedPerson(
+            video       = vs,
+            track_id    = t['track_id'],
+            frame_start = t['frame_start'],
+            frame_end   = t['frame_end'],
+            frame_count = t['frame_count'],
+            visibility  = t['mean_visibility'],
+            meta        = {
+                'bboxes':    t['bboxes'][::10],
+                'mask_path': None,
+            },
+        )
+
+        best_b64 = t.get('best_frame_b64')
+        if best_b64:
+            data = base64.b64decode(best_b64)
+            arr  = np.frombuffer(data, np.uint8)
+            crop = cv2.imdecode(arr, cv2.IMREAD_COLOR)
+            if crop is not None and crop.size > 0:
+                dp.thumbnail.save(
+                    f"person_{vs.id}_{t['track_id']}.jpg",
+                    _bgr_to_jpeg_file(crop, max_size=256),
+                    save=False,
+                )
+
+        dp.save()
+        created += 1
+
+    log.info("detect_persons_for_video: %d track(s) created for video %s", created, vs.id)
+    return created
+
+
+def _detect_persons_local(vs: VideoSource) -> int:
+    """Fallback: lokale MediaPipe CPU-Detection (falls pose-worker nicht verfügbar)."""
+    from django.conf import settings
+    from .detection.person_detector import detect_persons_in_video
 
     mask_dir = os.path.join(
         getattr(settings, 'MEDIA_ROOT', 'media'),
         'masks',
         str(vs.id),
     )
-
-    tracks = detect_persons_in_video(
-        video_path=vs.path,
-        mask_output_dir=mask_dir,
-    )
-
+    tracks  = detect_persons_in_video(video_path=vs.path, mask_output_dir=mask_dir)
     created = 0
     for t in tracks:
         dp = DetectedPerson(
@@ -154,22 +211,17 @@ def detect_persons_for_video(vs: VideoSource) -> int:
             frame_end   = t.frame_end,
             frame_count = t.frame_count,
             visibility  = t.mean_visibility,
-            meta        = {
-                # Store a sparse sample of bounding boxes (every 10th detection)
-                'bboxes':    t.bboxes[::10],
-                'mask_path': t.mask_path,
-            },
+            meta        = {'bboxes': t.bboxes[::10], 'mask_path': t.mask_path},
         )
-
         if t.best_frame_crop is not None and t.best_frame_crop.size > 0:
             dp.thumbnail.save(
                 f"person_{vs.id}_{t.track_id}.jpg",
                 _bgr_to_jpeg_file(t.best_frame_crop, max_size=256),
                 save=False,
             )
-
         dp.save()
         created += 1
+    return created
 
     log.info("detect_persons_for_video: created %d DetectedPerson(s) for %s",
              created, vs.filename)

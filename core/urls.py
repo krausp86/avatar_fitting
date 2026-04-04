@@ -8,6 +8,7 @@ urlpatterns = [
     # Videos
     path('videos/', views.video_list, name='video_list'),
     path('videos/scan/', views.scan_videos, name='scan_videos'),
+    path('videos/refresh-metadata/', views.refresh_video_metadata, name='refresh_video_metadata'),
     path('videos/<uuid:pk>/', views.video_detail, name='video_detail'),
     path('videos/<uuid:pk>/detect/', views.detect_persons, name='detect_persons'),
     path('videos/<uuid:pk>/detect/status/', views.detect_persons_status, name='detect_persons_status'),
@@ -48,6 +49,7 @@ urlpatterns = [
     path('videos/<uuid:pk>/delete/', views.video_delete, name='video_delete'),
     path('api/job/<uuid:pk>/status/', views.job_status, name='job_status'),
     path('api/avatar/<uuid:pk>/log/', views.avatar_log, name='avatar_log'),
+    path('api/avatar/<uuid:pk>/fit-quality/', views.avatar_fit_quality, name='avatar_fit_quality'),
     path('api/avatar/<uuid:pk>/export/', views.avatar_export, name='avatar_export'),
     path('api/avatar/<uuid:pk>/versions/', views.avatar_versions, name='avatar_versions'),
     path('avatars/<uuid:pk>/previews/<int:n>/', views.avatar_preview_image, name='avatar_preview_image'),

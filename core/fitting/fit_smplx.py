@@ -280,18 +280,32 @@ def _collect_frames(group, max_frames: int = 150, stride: int = 3,
             step = max(1, len(kps_list) // max_frames)
             kps_list = kps_list[::step][:max_frames]
 
+        n_skipped = 0
         for i, kp in enumerate(kps_list):
+            lms = kp.body_landmarks or []
+            # Mindestens 4 Body-Joints mit ausreichender Konfidenz müssen sichtbar sein.
+            # Schützt vor leeren Frames, Handtüchern, o.ä. Fehldetektionen.
+            n_vis = sum(
+                1 for d in lms
+                if d.get('visibility', 0) > BODY_VIS_THRESHOLD
+            )
+            if n_vis < 4:
+                n_skipped += 1
+                continue
             all_frames.append({
                 'person_id':       str(person.id),
                 'frame_idx':       kp.frame_idx,
-                'clip_id':         str(person.id),   # jede Person = eigener Clip
+                'clip_id':         str(person.id),
                 'sample_order':    i,
                 'W':               W,
                 'H':               H,
-                'body_landmarks':  kp.body_landmarks or [],
+                'body_landmarks':  lms,
                 'rtm_landmarks':   kp.rtm_landmarks or [],
-                'kp_obj':          kp,
+                'video_path':      video_path,  # für pose-worker _read_frame_for_fd
             })
+        if n_skipped:
+            log.info("_collect_frames: %d Frames für person %s verworfen (< 4 sichtbare Joints)",
+                     n_skipped, person.id)
 
     # Optionales Gesamt-Limit (wichtig für Phase A: Batch läuft auf GPU)
     if max_total is not None and len(all_frames) > max_total:
@@ -439,10 +453,11 @@ def run_phase_a(
         return pose_z
 
     # ── Optimierungs-Schleife ──────────────────────────────────────────────────
-    params_p1 = [beta, glob_orient, transl, log_focal]
-    params_p2 = params_p1 + [pose_z]
+    params_p1 = [beta, glob_orient, transl, log_focal, pose_z]
+    params_p2 = [beta, glob_orient, transl, log_focal, pose_z]
 
-    SIGMA_BODY_SQ = 100.0 ** 2
+    SIGMA_BODY_SQ     = 100.0  ** 2
+    SIGMA_BODY_WARMUP = 1000.0 ** 2   # near-L2 warm-up to escape large initial errors
     W_KP, W_PELV, W_BETA, W_POSE, W_TEMP, W_FOC = 1.0, 0.5, 0.5, 0.003, 0.2, 0.05
 
     total_epochs = n_phase1_epochs + n_phase2_epochs
@@ -456,8 +471,10 @@ def run_phase_a(
             opt.zero_grad()
             body_pose = get_body_pose()
 
-            with torch.no_grad():
-                smplx_model.betas.fill_(0)  # ensure model betas don't interfere
+            # Anneal sigma: first 30% of epochs use warm-up (≈L2), rest use robust target
+            t = ep / max(n_ep - 1, 1)
+            warmup_frac = min(1.0, t / 0.3)
+            sigma_sq = SIGMA_BODY_WARMUP * (1 - warmup_frac) + SIGMA_BODY_SQ * warmup_frac
 
             out = smplx_model(
                 betas        = beta.expand(N, -1),
@@ -472,13 +489,13 @@ def run_phase_a(
             j2d_body = j2d[:, BODY_SMPLX_IDX, :]  # (N, K, 2)
             vis  = kp_t[:, :, 2:3]                 # (N, K, 1)
             r_sq = ((j2d_body - kp_t[:, :, :2]) ** 2).sum(-1)  # (N, K)
-            loss_kp = (gmof(r_sq, SIGMA_BODY_SQ) * vis[:, :, 0]).sum() / (vis.sum() + 1e-6)
+            loss_kp = (gmof(r_sq, sigma_sq) * vis[:, :, 0]).sum() / (vis.sum() + 1e-6)
 
             # Becken-Anker
             j2d_pelv = j2d[:, 0, :]  # SMPL-X joint 0 = Becken
             pelv_vis  = pelv_t[:, 2:3]
             r_sq_pelv = ((j2d_pelv - pelv_t[:, :2]) ** 2).sum(-1)  # (N,)
-            loss_pelv = (gmof(r_sq_pelv, SIGMA_BODY_SQ) * pelv_vis[:, 0]).sum() / (pelv_vis.sum() + 1e-6)
+            loss_pelv = (gmof(r_sq_pelv, sigma_sq) * pelv_vis[:, 0]).sum() / (pelv_vis.sum() + 1e-6)
 
             # Priors
             loss_beta = beta.pow(2).mean()
@@ -683,14 +700,15 @@ def run_phase_b_frame(
         y_px = cam_scale[0, 0] * (-j[:, 1]) + cam_ty[0, 0]
         return torch.stack([x_px, y_px], dim=-1)   # (J, 2)
 
-    SIGMA_BODY_SQ  = 100.0 ** 2
+    SIGMA_BODY_SQ     = 100.0  ** 2
+    SIGMA_BODY_WARMUP = 1000.0 ** 2   # near-L2 warm-up sigma
     SIGMA_FACE_SQ  = 5.0   ** 2
     SIGMA_HAND_SQ  = 10.0  ** 2
 
     W_BODY, W_FACE, W_HAND = 1.0, 0.5, 0.3
     W_POSE, W_EXPR, W_JAW, W_HAND_PRIOR = 0.005, 0.01, 0.05, 0.01
 
-    def compute_losses(include_face_hands: bool):
+    def compute_losses(include_face_hands: bool, sigma_body_sq: float = SIGMA_BODY_SQ):
         body_pose = get_body_pose()
 
         out = smplx_model(
@@ -711,7 +729,7 @@ def run_phase_b_frame(
         j2d_body = j2d[BODY_SMPLX_IDX]  # (K, 2)
         vis_body = kp_body_t[:, 2]       # (K,)
         r_sq_body = ((j2d_body - kp_body_t[:, :2]) ** 2).sum(-1)  # (K,)
-        loss_body = (gmof(r_sq_body, SIGMA_BODY_SQ) * vis_body).sum() / (vis_body.sum() + 1e-6)
+        loss_body = (gmof(r_sq_body, sigma_body_sq) * vis_body).sum() / (vis_body.sum() + 1e-6)
 
         loss_face = loss_lhand = loss_rhand = torch.zeros(1, device=device)[0]
 

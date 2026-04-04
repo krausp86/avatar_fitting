@@ -1,10 +1,26 @@
 # docker-compose.override.yml
-# Used automatically by docker compose for local CPU development.
+# Automatically loaded by docker compose – GPU is the default on this machine.
 #
-# Usage: docker compose up
-# GPU:   docker compose -f docker-compose.yml -f docker-compose.gpu.yml up
+# Usage: docker compose up                              (GPU – default)
+#        docker compose -f docker-compose.yml -f docker-compose.cpu.yml up   (CPU only)
 
 services:
   web:
     build:
-      dockerfile: Dockerfile.cpu
+      dockerfile: Dockerfile
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  pose-worker:
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

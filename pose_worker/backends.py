@@ -36,6 +36,7 @@ MODEL_URL  = "https://storage.googleapis.com/mediapipe-models/pose_landmarker/po
 MODEL_PATH = "/data/models/pose_landmarker_heavy.task"
 
 _MODEL_CACHE: Dict[str, Any] = {}
+_MODEL_LOAD_FAILED: set = set()   # backends that failed to load – never retry
 
 
 def _ensure_mediapipe_model():
@@ -101,9 +102,13 @@ class PoseBackend(ABC):
 
     @classmethod
     def _get_model(cls):
+        if cls.backend_id in _MODEL_LOAD_FAILED:
+            raise RuntimeError(f"{cls.backend_id}: model load failed previously – not retrying")
         if cls.backend_id not in _MODEL_CACHE:
             with _MODEL_LOAD_LOCK:
                 if cls.backend_id not in _MODEL_CACHE:  # re-check after acquiring
+                    if cls.backend_id in _MODEL_LOAD_FAILED:
+                        raise RuntimeError(f"{cls.backend_id}: model load failed previously – not retrying")
                     log.info(">>> Loading model: %s – this may take 1-3 minutes …", cls.backend_id)
                     t0 = time.perf_counter()
                     try:
@@ -111,6 +116,7 @@ class PoseBackend(ABC):
                         log.info(">>> Model ready: %s  (%.1f s)", cls.backend_id, time.perf_counter() - t0)
                     except Exception as e:
                         log.error(">>> Model load failed: %s – %s. Marking unavailable.", cls.backend_id, e)
+                        _MODEL_LOAD_FAILED.add(cls.backend_id)
                         cls.available = False
                         raise
         return _MODEL_CACHE[cls.backend_id]
@@ -556,6 +562,10 @@ class HMR2Backend:
         log.info("HMR2: loading from %s", ckpt)
         model, cfg = load_hmr2(ckpt)
         model = model.eval()
+        import torch as _torch
+        if _torch.cuda.is_available():
+            model = model.cuda()
+            log.info("HMR2: model on GPU")
         log.info("HMR2: model ready")
         return model, cfg
 
@@ -580,7 +590,8 @@ class HMR2Backend:
 
         img = cv2.resize(img_rgb, (256, 256)).astype(np.float32) / 255.0
         img = (img - mean) / std                                   # (256, 256, 3)
-        img_t = torch.tensor(img).permute(2, 0, 1).unsqueeze(0)   # (1, 3, 256, 256)
+        device = next(cls._model.parameters()).device
+        img_t = torch.tensor(img).permute(2, 0, 1).unsqueeze(0).to(device)   # (1, 3, 256, 256)
 
         with torch.no_grad():
             out = cls._model({'img': img_t})

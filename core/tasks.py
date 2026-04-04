@@ -5,6 +5,7 @@ Progress is sent via Django Channels WebSocket to the browser.
 """
 import logging
 import os
+import time
 import threading
 from django.conf import settings
 from django.utils import timezone
@@ -12,6 +13,8 @@ from asgiref.sync import async_to_sync
 from channels.layers import get_channel_layer
 
 from .models import Avatar, FittingJob
+
+POSE_WORKER_URL = os.environ.get("POSE_WORKER_URL", "http://pose-worker:8001")
 
 log = logging.getLogger(__name__)
 
@@ -153,10 +156,12 @@ def _run_fitting(job_id, config: dict):
 
 def _run_stage0(avatar, config: dict, progress_cb) -> None:
     """
-    Stage 0 (NEU): Phase A — Beta-Schätzung via GMoF + VPoser über alle Clips.
-    Ersetzt den alten shape_fit/_run_shape_job Ansatz.
+    Stage 0: Phase A — Beta-Schätzung.
+    Keypoints werden aus der DB gesammelt und per HTTP an den pose-worker geschickt,
+    der die GPU-Optimierung ausführt. Ergebnis wird in PersonShape gespeichert.
     """
-    from .fitting.fit_smplx import run_phase_a, save_phase_a_result, _collect_frames, _fetch_smplx_init_for_frame, _read_frame_for_fd
+    import httpx
+    from .fitting.fit_smplx import save_phase_a_result, _collect_frames
 
     if not avatar.group_id:
         log.warning("Stage 0: avatar has no group – skipped")
@@ -167,12 +172,12 @@ def _run_stage0(avatar, config: dict, progress_cb) -> None:
     group = PersonGroup.objects.get(pk=avatar.group_id)
 
     max_frames_a   = int(config.get('max_frames_a', 150))
-    n_a1_epochs    = int(config.get('n_a1_epochs',  300))
-    n_a2_epochs    = int(config.get('n_a2_epochs',  200))
+    n_a1_epochs    = int(config.get('n_a1_epochs',  config.get('n_warmup_epochs', 300)))
+    n_a2_epochs    = int(config.get('n_a2_epochs',  config.get('n_shape_epochs',  200)))
     use_smplx_init = bool(config.get('use_smplx_init', True))
     total_epochs   = n_a1_epochs + n_a2_epochs
 
-    # ── Keypoint-Extraktion: PersonFrameKeypoints befüllen wenn leer ──────────
+    # ── Keypoints in DB befüllen wenn nötig ──────────────────────────────────
     from .shape_tasks import _compute_keypoints, _sample_indices
     from .models import ShapeFitSettings
     cfg = ShapeFitSettings.get()
@@ -210,39 +215,56 @@ def _run_stage0(avatar, config: dict, progress_cb) -> None:
     if not frames:
         raise RuntimeError("Stage 0: keine Frames mit Keypoints in der PersonGroup")
 
-    smplx_inits = [None] * len(frames)
-    if use_smplx_init:
-        n_ok = 0
-        for i, fd in enumerate(frames):
-            try:
-                frame_bgr = _read_frame_for_fd(fd)
-                if frame_bgr is not None:
-                    smplx_inits[i] = _fetch_smplx_init_for_frame(frame_bgr)
-                    if smplx_inits[i]:
-                        n_ok += 1
-            except Exception:
-                pass
-        log.info("Stage 0: SMPLer-X init %d/%d frames", n_ok, len(frames))
+    # ── Phase A per HTTP an pose-worker schicken ──────────────────────────────
+    log.info("Stage 0: sende %d Frames an pose-worker für Phase A", len(frames))
+    resp = httpx.post(
+        f"{POSE_WORKER_URL}/fit/phase-a",
+        json={
+            'frames_data':     frames,
+            'n_phase1_epochs': n_a1_epochs,
+            'n_phase2_epochs': n_a2_epochs,
+            'use_smplx_init':  use_smplx_init,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    job_id = resp.json()['job_id']
+    log.info("Stage 0: Phase A job_id=%s", job_id)
 
-    def _cb(data):
+    # ── Polling bis done ──────────────────────────────────────────────────────
+    while True:
+        status_resp = httpx.get(f"{POSE_WORKER_URL}/fit/{job_id}", timeout=10.0)
+        status_resp.raise_for_status()
+        data = status_resp.json()
+        status = data['status']
+
+        if status == 'done':
+            break
+        elif status == 'failed':
+            raise RuntimeError(f"Phase A im pose-worker fehlgeschlagen: {data.get('error')}")
+
+        progress = data.get('progress', 0.0)
+        epoch_approx = int(progress * total_epochs)
         progress_cb({
             'type':         'progress',
             'stage':        '0',
             'stage_name':   'Beta Fitting (Phase A)',
-            'epoch':        data.get('epoch_all', data.get('epoch', 0)),
+            'epoch':        epoch_approx,
             'total_epochs': total_epochs,
-            'loss':         data.get('loss', 0.0),
-            'loss_terms':   data.get('loss_terms', {}),
+            'loss':         data.get('latest_loss', 0.0),
         })
+        time.sleep(2)
 
-    phase_a = run_phase_a(
-        frames_data     = frames,
-        smplx_inits     = smplx_inits,
-        n_phase1_epochs = n_a1_epochs,
-        n_phase2_epochs = n_a2_epochs,
-        progress_cb     = _cb,
-    )
+    phase_a = data['result']
+
+    # ── Ergebnis in DB speichern (bleibt im web-Container) ────────────────────
     save_phase_a_result(phase_a, group)
+
+    # Aufräumen
+    try:
+        httpx.delete(f"{POSE_WORKER_URL}/fit/{job_id}", timeout=5.0)
+    except Exception:
+        pass
 
     log.info("Stage 0 complete: kp_loss=%.4f  focal_scale=%.3f  n_frames=%d",
              phase_a['kp_loss'], phase_a['focal_scale'], phase_a['n_frames'])
@@ -255,16 +277,12 @@ def _run_stage0(avatar, config: dict, progress_cb) -> None:
 
 def _run_stage1(avatar, config: dict, progress_cb) -> None:
     """
-    Stage 1 (NEU): Phase B — Pro-Frame Full SMPL-X (body + face + hands).
+    Stage 1: Phase B — Pro-Frame Full SMPL-X (body + face + hands).
     Beta kommt aus Stage 0 (PersonShape.betas).
+    Optimierung läuft im pose-worker (GPU), Ergebnis wird in web in DB gespeichert.
     """
-    from .fitting.fit_smplx import (
-        run_phase_b_frame, save_phase_b_results,
-        _collect_frames, _load_smplx_phase_b, _try_load_vposer,
-        _fetch_smplx_init_for_frame, _read_frame_for_fd,
-        _smplx_cache,
-    )
-    import torch
+    import httpx
+    from .fitting.fit_smplx import FrameFitResult, save_phase_b_results, _collect_frames
 
     if not avatar.group_id:
         log.warning("Stage 1: avatar has no group – skipped")
@@ -280,65 +298,96 @@ def _run_stage1(avatar, config: dict, progress_cb) -> None:
         raise RuntimeError("Stage 1: PersonShape fehlt – bitte zuerst Stage 0 ausführen")
 
     max_frames_b   = int(config.get('max_frames_b',   200))
-    n_b1_epochs    = int(config.get('n_b1_epochs',    100))
-    n_b2_epochs    = int(config.get('n_b2_epochs',    150))
-    use_smplx_init = bool(config.get('use_smplx_init', True))
+    n_b1_epochs    = int(config.get('n_b1_epochs',    config.get('n_poseref_epochs', 100)))
+    n_b2_epochs    = int(config.get('n_b2_epochs',    config.get('n_pose_epochs',   150)))
+    # Stage 1 läuft pro Frame – HMR2/SMPLer-X Init ist teuer, daher default False
+    use_smplx_init = bool(config.get('use_smplx_init_b', False))
 
     frames = _collect_frames(group, max_frames=max_frames_b)
     if not frames:
-        raise RuntimeError("Stage 1: keine Frames")
-
-    device  = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    smplx_b = _load_smplx_phase_b(device)
-    vposer  = _try_load_vposer(device)
-    betas_t = torch.tensor([betas], dtype=torch.float32, device=device)
+        # Keypoints fehlen – neu berechnen (wie Stage 0)
+        log.info("Stage 1: keine Keypoints in DB – berechne nach")
+        from .shape_tasks import _compute_keypoints, _sample_indices
+        from .models import ShapeFitSettings, PersonFrameKeypoints
+        cfg = ShapeFitSettings.get()
+        for person in group.persons.select_related('video').all():
+            video_path = person.video.path
+            if not os.path.exists(video_path):
+                continue
+            indices = _sample_indices(
+                person.frame_start, person.frame_end,
+                cfg.frames_per_clip, cfg.frame_stride,
+            )
+            for frame_idx in indices:
+                if PersonFrameKeypoints.objects.filter(person=person, frame_idx=frame_idx).exists():
+                    continue
+                kp_data = _compute_keypoints(video_path, frame_idx)
+                if kp_data:
+                    PersonFrameKeypoints.objects.get_or_create(
+                        person=person, frame_idx=frame_idx,
+                        defaults={
+                            'body_landmarks': kp_data['body_landmarks'],
+                            'rtm_landmarks':  kp_data['rtm_landmarks'],
+                            'seg_mask_b64':   kp_data.get('seg_mask_b64', ''),
+                        }
+                    )
+        frames = _collect_frames(group, max_frames=max_frames_b)
+        if not frames:
+            raise RuntimeError("Stage 1: keine Keypoints verfügbar – Pose-Worker erreichbar?")
 
     n_b = len(frames)
-    frame_results = []
 
-    try:
-        for i, fd in enumerate(frames):
-            phase_a_pose = {'body_pose': [0.0]*63, 'global_orient': [0.0]*3, 'transl': [0.0, 0.0, 3.0]}
+    # ── Phase B per HTTP an pose-worker schicken ──────────────────────────────
+    log.info("Stage 1: sende %d Frames an pose-worker für Phase B", n_b)
+    resp = httpx.post(
+        f"{POSE_WORKER_URL}/fit/phase-b",
+        json={
+            'frames_data':   frames,
+            'betas':         betas,
+            'n_b1_epochs':   n_b1_epochs,
+            'n_b2_epochs':   n_b2_epochs,
+            'use_smplx_init': use_smplx_init,
+        },
+        timeout=30.0,
+    )
+    resp.raise_for_status()
+    job_id = resp.json()['job_id']
+    log.info("Stage 1: Phase B job_id=%s", job_id)
 
-            smplx_init = None
-            if use_smplx_init:
-                try:
-                    frame_bgr = _read_frame_for_fd(fd)
-                    if frame_bgr is not None:
-                        smplx_init = _fetch_smplx_init_for_frame(frame_bgr)
-                except Exception:
-                    pass
+    # ── Polling bis done ──────────────────────────────────────────────────────
+    while True:
+        status_resp = httpx.get(f"{POSE_WORKER_URL}/fit/{job_id}", timeout=10.0)
+        status_resp.raise_for_status()
+        data = status_resp.json()
+        status = data['status']
 
-            result = run_phase_b_frame(
-                fd          = fd,
-                betas       = betas_t,
-                smplx_model = smplx_b,
-                vposer      = vposer,
-                phase_a_pose= phase_a_pose,
-                smplx_init  = smplx_init,
-                n_b1_epochs = n_b1_epochs,
-                n_b2_epochs = n_b2_epochs,
-                device      = device,
-            )
-            frame_results.append(result)
+        if status == 'done':
+            break
+        elif status == 'failed':
+            raise RuntimeError(f"Phase B im pose-worker fehlgeschlagen: {data.get('error')}")
 
-            if i % 10 == 0:
-                progress_cb({
-                    'type':         'progress',
-                    'stage':        '1',
-                    'stage_name':   'Per-Frame SMPL-X (Phase B)',
-                    'epoch':        i + 1,
-                    'total_epochs': n_b,
-                    'loss':         result.loss_body,
-                    'loss_terms':   {'body': result.loss_body, 'face': result.loss_face},
-                    'notes':        f'Frame {i+1}/{n_b}',
-                })
-    finally:
-        _smplx_cache.clear()
+        progress    = data.get('progress', 0.0)
+        latest_loss = data.get('latest_loss', 0.0)
+        total_ep    = n_b1_epochs + n_b2_epochs
+        ep_done     = int(progress * total_ep)
+        log.info("Stage 1 poll: progress=%.3f ep=%d/%d  n_frames=%d  latest_loss=%.2f",
+                 progress, ep_done, total_ep, n_b, latest_loss or 0)
+        progress_cb({
+            'type':         'progress',
+            'stage':        '1',
+            'stage_name':   'Per-Frame SMPL-X (Phase B)',
+            'epoch':        ep_done,
+            'total_epochs': total_ep,
+            'loss':         latest_loss,
+            'notes':        f'Ep {ep_done}/{total_ep}  ({n_b} frames batch)',
+        })
+        time.sleep(2)
+
+    # ── Ergebnisse in DB speichern ────────────────────────────────────────────
+    raw_results = data['result']['frame_results']
+    frame_results = [FrameFitResult(**d) for d in raw_results]
 
     save_phase_b_results(frame_results)
-
-    # Write poses.npz + metadata.json so Stage 2 (and avatar_detail) can read them
     _save_stage1_files(avatar, frames, frame_results, betas)
 
     try:
@@ -348,10 +397,17 @@ def _run_stage1(avatar, config: dict, progress_cb) -> None:
     except Exception:
         log.exception("Phase B smoothing fehlgeschlagen – weiter ohne")
 
+    # Aufräumen
+    try:
+        httpx.delete(f"{POSE_WORKER_URL}/fit/{job_id}", timeout=5.0)
+    except Exception:
+        pass
+
     log.info("Stage 1 complete: %d frames für avatar %s", n_b, avatar.id)
     last_loss = frame_results[-1].loss_body if frame_results else 0.0
+    total_ep = n_b1_epochs + n_b2_epochs
     progress_cb({
-        'type': 'progress', 'epoch': n_b, 'total_epochs': n_b,
+        'type': 'progress', 'epoch': total_ep, 'total_epochs': total_ep,
         'loss': last_loss,
     })
 
