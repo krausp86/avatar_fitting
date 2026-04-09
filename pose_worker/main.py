@@ -14,14 +14,14 @@ from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 
 from backends import ALL_BACKENDS, BACKEND_BY_ID, MediaPipeBackend, RTMPoseBackend, ViTPoseBackend, SMPLerXBackend, HMR2Backend, draw_combined
-from fit_router import router as fit_router
+
 
 logging.basicConfig(level=logging.INFO,
                     format='%(asctime)s %(levelname)-8s %(name)s %(message)s')
 log = logging.getLogger(__name__)
 
 app = FastAPI(title="Pose Worker")
-app.include_router(fit_router, prefix="/fit", tags=["fitting"])
+
 
 
 class AnalyzeRequest(BaseModel):
