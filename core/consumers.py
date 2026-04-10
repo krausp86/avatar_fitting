@@ -1,1 +1,1 @@
-# WebSocket consumers – placeholder, no active fitting jobs
+# No active WebSocket consumers

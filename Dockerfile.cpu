@@ -1,50 +1,36 @@
-# ─────────────────────────────────────────────────────────────────────────────
-# SOMA Avatar System – CPU-only Dockerfile (development / no GPU)
-# ─────────────────────────────────────────────────────────────────────────────
-
-FROM python:3.11-slim AS base-ml
+# CPU-only variant – identisch mit Dockerfile, explizit ohne nvidia-Basis
+# Wird via: docker compose -f docker-compose.yml -f docker-compose.cpu.yml up genutzt
+FROM ubuntu:22.04 AS base
 
 ENV DEBIAN_FRONTEND=noninteractive \
     PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
-    PIP_NO_CACHE_DIR=1
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    git wget curl \
-    gcc g++ \
-    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev \
-    libgles2 libegl1 libgbm1 \
-    ffmpeg \
+    python3 python3-pip python3-dev git curl gosu \
+    libgl1 libglib2.0-0 libsm6 libxext6 libxrender-dev ffmpeg tzdata \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip install --upgrade pip setuptools wheel packaging
-
-COPY requirements-ml.txt /tmp/requirements-ml.txt
-RUN pip install \
-    torch==2.3.0 torchvision==0.18.0 \
-    --index-url https://download.pytorch.org/whl/cpu \
-    && pip install -r /tmp/requirements-ml.txt
-
-
-FROM base-ml AS fitting
-
-COPY requirements-fitting.txt /tmp/requirements-fitting.txt
-RUN pip install -r /tmp/requirements-fitting.txt
-# realesrgan needed for Stage 2.5 (texture super-res) – not yet implemented, skip for now
-# RUN pip install realesrgan 2>/dev/null || true
-
-
-FROM fitting AS app-deps
+RUN curl -sS https://bootstrap.pypa.io/get-pip.py | python3 \
+    && pip3 install --upgrade setuptools wheel
 
 COPY requirements.txt /tmp/requirements.txt
-RUN pip install -r /tmp/requirements.txt
+RUN pip3 install -r /tmp/requirements.txt
 
+FROM base AS app
 
-FROM app-deps AS app
-
+RUN groupadd -r soma && useradd -r -g soma -d /app -s /sbin/nologin soma
 WORKDIR /app
-COPY . .
-RUN mkdir -p /app/avatar_data /app/video_data /app/media /app/staticfiles /data/db
-RUN python manage.py collectstatic --noinput 2>/dev/null || true
+COPY --chown=soma:soma . .
+RUN mkdir -p /app/media /app/staticfiles /data/db /data/media /data/media/thumbnails /data/avatars \
+    && chown -R soma:soma /app /data
+USER soma
+RUN python3 manage.py collectstatic --noinput 2>/dev/null || true
+USER root
+COPY docker-entrypoint.sh /usr/local/bin/docker-entrypoint.sh
+RUN chmod +x /usr/local/bin/docker-entrypoint.sh
 EXPOSE 8000
-CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "avatar_system.asgi:application"]
+ENTRYPOINT ["docker-entrypoint.sh"]
+CMD ["daphne", "-b", "0.0.0.0", "-p", "8000", "--websocket_timeout", "3600", "avatar_system.asgi:application"]

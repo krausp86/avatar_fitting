@@ -223,10 +223,6 @@ def _detect_persons_local(vs: VideoSource) -> int:
         created += 1
     return created
 
-    log.info("detect_persons_for_video: created %d DetectedPerson(s) for %s",
-             created, vs.filename)
-    return created
-
 
 # ─── Internal helpers ─────────────────────────────────────────────────────────
 

@@ -2,7 +2,7 @@ import os
 import threading
 from django.shortcuts import render, get_object_or_404, redirect
 from django.http import JsonResponse, StreamingHttpResponse, Http404
-from django.views.decorators.http import require_POST, require_GET
+from django.views.decorators.http import require_POST
 from django.conf import settings
 from django.db.models import Count
 
