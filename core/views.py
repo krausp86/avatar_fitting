@@ -172,6 +172,90 @@ def person_delete(request, pk):
     return JsonResponse({'status': 'deleted', 'video_id': str(video_pk)})
 
 
+@require_POST
+def person_set_frames(request, pk):
+    """Manually correct frame_start / frame_end of a DetectedPerson track."""
+    person = get_object_or_404(DetectedPerson, pk=pk)
+    try:
+        frame_start = int(request.POST['frame_start'])
+        frame_end   = int(request.POST['frame_end'])
+    except (KeyError, ValueError):
+        return JsonResponse({'error': 'frame_start and frame_end required'}, status=400)
+    if frame_start < 0 or frame_end < frame_start:
+        return JsonResponse({'error': 'Invalid frame range'}, status=400)
+    person.frame_start  = frame_start
+    person.frame_end    = frame_end
+    person.frame_count  = frame_end - frame_start + 1
+    person.save(update_fields=['frame_start', 'frame_end', 'frame_count'])
+    return JsonResponse({
+        'status':      'ok',
+        'frame_start': person.frame_start,
+        'frame_end':   person.frame_end,
+        'frame_count': person.frame_count,
+    })
+
+
+@require_POST
+def person_create(request, pk):
+    """Manually create a new DetectedPerson track for a video."""
+    import uuid as _uuid
+    video = get_object_or_404(VideoSource, pk=pk)
+    try:
+        frame_start = int(request.POST['frame_start'])
+        frame_end   = int(request.POST['frame_end'])
+    except (KeyError, ValueError):
+        return JsonResponse({'error': 'frame_start and frame_end required'}, status=400)
+    if frame_start < 0 or frame_end < frame_start:
+        return JsonResponse({'error': 'Invalid frame range'}, status=400)
+
+    # generate a unique manual track_id that won't collide with auto-detected ones
+    track_id = 'm_' + _uuid.uuid4().hex[:8]
+    person = DetectedPerson.objects.create(
+        video       = video,
+        track_id    = track_id,
+        frame_start = frame_start,
+        frame_end   = frame_end,
+        frame_count = frame_end - frame_start + 1,
+        visibility  = 1.0,
+        meta        = {'manual': True},
+    )
+
+    # grab thumbnail from best-effort frame extraction
+    try:
+        import cv2, io
+        from django.core.files.base import ContentFile
+        from PIL import Image as PILImage
+        frame_idx = (frame_start + frame_end) // 2
+        cap = cv2.VideoCapture(video.path)
+        cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
+        ret, frame = cap.read()
+        cap.release()
+        if ret:
+            h, w = frame.shape[:2]
+            scale = min(256 / w, 256 / h, 1.0)
+            if scale < 1.0:
+                frame = cv2.resize(frame, (int(w*scale), int(h*scale)), interpolation=cv2.INTER_AREA)
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+            buf = io.BytesIO()
+            PILImage.fromarray(rgb).save(buf, format='JPEG', quality=85)
+            buf.seek(0)
+            person.thumbnail.save(f'person_{video.id}_{track_id}.jpg', ContentFile(buf.read()), save=True)
+    except Exception:
+        pass
+
+    return JsonResponse({
+        'status':      'created',
+        'person_id':   str(person.pk),
+        'track_id':    person.track_id,
+        'frame_start': person.frame_start,
+        'frame_end':   person.frame_end,
+        'frame_count': person.frame_count,
+        'thumbnail':   person.thumbnail.url if person.thumbnail else None,
+        'set_frames_url': request.build_absolute_uri(f'/persons/{person.pk}/set-frames/'),
+        'delete_url':     request.build_absolute_uri(f'/persons/{person.pk}/delete/'),
+    })
+
+
 # ─── Person groups ────────────────────────────────────────────────────────────
 
 def person_list(request):

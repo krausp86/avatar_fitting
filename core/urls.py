@@ -16,6 +16,8 @@ urlpatterns = [
     path('videos/<uuid:pk>/stream/', views.video_stream, name='video_stream'),
     path('videos/<uuid:pk>/delete/', views.video_delete, name='video_delete'),
     path('persons/<uuid:pk>/delete/', views.person_delete, name='person_delete'),
+    path('persons/<uuid:pk>/set-frames/', views.person_set_frames, name='person_set_frames'),
+    path('videos/<uuid:pk>/persons/create/', views.person_create, name='person_create'),
 
     # Person groups
     path('persons/', views.person_list, name='person_list'),

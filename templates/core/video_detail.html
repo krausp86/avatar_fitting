@@ -1,4 +1,5 @@
 {% extends "base.html" %}
+{% load core_extras %}
 {% block title %}{{ video.filename }}{% endblock %}
 {% block nav_videos %}active{% endblock %}
 {% block page_title %}{{ video.filename }}{% endblock %}
@@ -28,6 +29,33 @@
 }
 .person-card:hover .person-card-delete { opacity: 1; }
 .person-card-delete:hover { color: #e74c3c; border-color: #e74c3c; }
+
+/* Edit-Button (Frames anpassen) */
+.person-card-edit {
+  position: absolute; top: 5px; right: 30px;
+  background: rgba(30,30,30,.85); border: 1px solid #444; border-radius: 3px;
+  color: #888; font-size: 11px; line-height: 1; padding: 3px 5px;
+  cursor: pointer; opacity: 0; transition: opacity .15s, color .15s;
+  z-index: 2;
+}
+.person-card:hover .person-card-edit { opacity: 1; }
+.person-card-edit:hover { color: #c8f060; border-color: #c8f060; }
+
+/* Frame-Edit Inline-Panel */
+.frame-edit-panel {
+  display: none; position: fixed; z-index: 100;
+  background: #1e1e1e; border: 1px solid #444; border-radius: 6px;
+  padding: 14px 16px; min-width: 260px;
+  box-shadow: 0 8px 32px rgba(0,0,0,.6);
+}
+.frame-edit-panel.open { display: block; }
+.frame-edit-panel label { font-size: 11px; color: #888; display: block; margin-bottom: 3px; }
+.frame-edit-panel input[type=number] {
+  width: 100%; background: #111; border: 1px solid #333; color: #eee;
+  padding: 5px 8px; border-radius: 3px; font-family: monospace; font-size: 13px;
+  margin-bottom: 8px;
+}
+.frame-edit-row { display: flex; gap: 6px; margin-top: 4px; }
 </style>
 {% endblock %}
 
@@ -136,8 +164,42 @@
   <div class="card">
     <div class="card-header">
       Erkannte Personen
-      <span class="text-muted text-mono text-sm">{{ persons|length }}</span>
+      <span class="text-muted text-mono text-sm" id="personCount">{{ persons|length }}</span>
+      <button class="btn btn-ghost btn-sm" style="margin-left:auto;font-size:11px"
+              onclick="openCreateTrack()">+ Neuer Track</button>
     </div>
+
+    <!-- Neuer-Track-Panel (inline, eingeklappt) -->
+    <div id="createTrackPanel" style="display:none;padding:12px 16px;border-bottom:1px solid #333;background:#171717">
+      <div style="font-size:11px;color:#888;margin-bottom:8px;font-weight:600;text-transform:uppercase;letter-spacing:.06em">
+        Manuellen Track anlegen
+      </div>
+      <div style="display:grid;grid-template-columns:1fr 1fr;gap:8px;margin-bottom:8px">
+        <div>
+          <label style="font-size:11px;color:#666;display:block;margin-bottom:3px">Von (frame_start)</label>
+          <div style="display:flex;gap:4px">
+            <input type="number" id="ctStart" min="0" placeholder="0"
+                   style="flex:1;background:#111;border:1px solid #333;color:#eee;padding:5px 8px;border-radius:3px;font-family:monospace;font-size:13px">
+            <button class="btn btn-ghost btn-sm" onclick="ctGrab('start')" title="Aktuellen Frame">⊙</button>
+          </div>
+        </div>
+        <div>
+          <label style="font-size:11px;color:#666;display:block;margin-bottom:3px">Bis (frame_end)</label>
+          <div style="display:flex;gap:4px">
+            <input type="number" id="ctEnd" min="0" placeholder="0"
+                   style="flex:1;background:#111;border:1px solid #333;color:#eee;padding:5px 8px;border-radius:3px;font-family:monospace;font-size:13px">
+            <button class="btn btn-ghost btn-sm" onclick="ctGrab('end')" title="Aktuellen Frame">⊙</button>
+          </div>
+        </div>
+      </div>
+      <div style="display:flex;align-items:center;gap:8px">
+        <button class="btn btn-primary btn-sm" onclick="saveCreateTrack()">Anlegen</button>
+        <button class="btn btn-ghost btn-sm" onclick="ctPreview()">▶ Vorschau</button>
+        <span id="ctInfo" style="font-size:11px;color:#555;margin-left:4px"></span>
+        <button class="btn btn-ghost btn-sm" style="margin-left:auto" onclick="closeCreateTrack()">Abbrechen</button>
+      </div>
+    </div>
+
     <div class="card-body">
       {% if persons %}
       <div class="person-grid">
@@ -150,7 +212,7 @@
           {% endif %}
           <div class="person-card-body">
             <div class="person-card-name">Track {{ person.track_id }}</div>
-            <div class="person-card-sub">{{ person.frame_count }} frames</div>
+            <div class="person-card-sub">{{ person.frame_end|subtract:person.frame_start|add:1 }} frames</div>
             <div class="person-card-sub">Sichtbarkeit {% widthratio person.visibility 1 100 %}%</div>
             {% with groups=person.groups.all %}
             {% if groups %}
@@ -162,6 +224,8 @@
           </div>
           <button class="person-card-delete" title="Track löschen"
                   onclick="deletePerson(event, '{{ person.pk }}', '{% url 'person_delete' person.pk %}')">✕</button>
+          <button class="person-card-edit" title="Frames anpassen"
+                  onclick="openFrameEdit(event, '{{ person.pk }}', {{ person.frame_start }}, {{ person.frame_end }}, '{% url 'person_set_frames' person.pk %}')">✎</button>
         </div>
         {% endfor %}
       </div>
@@ -176,6 +240,29 @@
   </div>
 
 </div><!-- /tab-overview -->
+
+<!-- ── Frame-Edit Popup ──────────────────────────────────────────────────── -->
+<div class="frame-edit-panel" id="frameEditPanel">
+  <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+    <span style="font-size:12px;font-weight:600;color:#ccc">Frames anpassen</span>
+    <button onclick="closeFrameEdit()" style="background:none;border:none;color:#666;cursor:pointer;font-size:14px">✕</button>
+  </div>
+  <label>Von (frame_start)</label>
+  <div style="display:flex;gap:6px;margin-bottom:8px">
+    <input type="number" id="feStart" min="0" style="flex:1">
+    <button class="btn btn-ghost btn-sm" onclick="grabCurrentFrame('start')" title="Aktuellen Video-Frame übernehmen">⊙ Jetzt</button>
+  </div>
+  <label>Bis (frame_end)</label>
+  <div style="display:flex;gap:6px;margin-bottom:12px">
+    <input type="number" id="feEnd" min="0" style="flex:1">
+    <button class="btn btn-ghost btn-sm" onclick="grabCurrentFrame('end')" title="Aktuellen Video-Frame übernehmen">⊙ Jetzt</button>
+  </div>
+  <div style="font-size:11px;color:#555;margin-bottom:10px" id="feInfo"></div>
+  <div class="frame-edit-row">
+    <button class="btn btn-primary btn-sm" style="flex:1" onclick="saveFrameEdit()">Speichern</button>
+    <button class="btn btn-ghost btn-sm" onclick="previewFrameEdit()">▶ Vorschau</button>
+  </div>
+</div>
 
 
 {% endblock %}
@@ -329,7 +416,7 @@ if (DETECTION_STATUS === 'detecting') {
 
 // ── Track löschen ─────────────────────────────────────────────────────────
 async function deletePerson(event, personId, url) {
-  event.stopPropagation();   // kein seekToClip auslösen
+  event.stopPropagation();
   if (!confirm('Track löschen? Er wird auch aus allen Gruppen entfernt.')) return;
 
   const fd = new FormData();
@@ -343,14 +430,183 @@ async function deletePerson(event, personId, url) {
       card.style.opacity = '0';
       setTimeout(() => card.remove(), 200);
     }
-    // Zähler in der Card-Header aktualisieren
-    const countEl = document.querySelector('.card-header .text-mono');
-    if (countEl) {
-      const n = parseInt(countEl.textContent) - 1;
-      countEl.textContent = n;
-    }
+    const countEl = document.getElementById('personCount');
+    if (countEl) countEl.textContent = parseInt(countEl.textContent) - 1;
   } else {
     toast('Löschen fehlgeschlagen', 'error');
+  }
+}
+
+// ── Frame-Edit ────────────────────────────────────────────────────────────
+let _fePersonId  = null;
+let _feUrl       = null;
+let _feCardEl    = null;
+
+function openFrameEdit(event, personId, frameStart, frameEnd, url) {
+  event.stopPropagation();
+  _fePersonId = personId;
+  _feUrl      = url;
+  _feCardEl   = document.getElementById('person-card-' + personId);
+
+  document.getElementById('feStart').value = frameStart;
+  document.getElementById('feEnd').value   = frameEnd;
+  _updateFeInfo();
+
+  // Popup neben der Card positionieren
+  const panel = document.getElementById('frameEditPanel');
+  const rect  = event.currentTarget.getBoundingClientRect();
+  panel.style.top  = Math.min(rect.bottom + 6, window.innerHeight - 260) + 'px';
+  panel.style.left = Math.max(rect.left - 270, 8) + 'px';
+  panel.classList.add('open');
+}
+
+function closeFrameEdit() {
+  document.getElementById('frameEditPanel').classList.remove('open');
+  _fePersonId = null; _feUrl = null; _feCardEl = null;
+}
+
+function grabCurrentFrame(which) {
+  const player = document.getElementById('videoPlayer');
+  if (!player) return;
+  const frame = Math.round(player.currentTime * VIDEO_FPS);
+  document.getElementById(which === 'start' ? 'feStart' : 'feEnd').value = frame;
+  _updateFeInfo();
+}
+
+function _updateFeInfo() {
+  const s = parseInt(document.getElementById('feStart').value) || 0;
+  const e = parseInt(document.getElementById('feEnd').value)   || 0;
+  const count = Math.max(0, e - s + 1);
+  const secs  = (count / VIDEO_FPS).toFixed(1);
+  document.getElementById('feInfo').textContent =
+    count > 0 ? `${count} Frames · ${secs}s` : '';
+}
+document.getElementById('feStart').addEventListener('input', _updateFeInfo);
+document.getElementById('feEnd').addEventListener('input',   _updateFeInfo);
+
+function previewFrameEdit() {
+  const s = parseInt(document.getElementById('feStart').value);
+  const e = parseInt(document.getElementById('feEnd').value);
+  if (isNaN(s) || isNaN(e)) return;
+  seekToClip(s, e);
+}
+
+async function saveFrameEdit() {
+  const s = parseInt(document.getElementById('feStart').value);
+  const e = parseInt(document.getElementById('feEnd').value);
+  if (isNaN(s) || isNaN(e) || e < s) {
+    toast('Ungültiger Frame-Bereich', 'error');
+    return;
+  }
+
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  fd.append('frame_start', s);
+  fd.append('frame_end',   e);
+  const r = await fetch(_feUrl, { method: 'POST', body: fd });
+  const d = await r.json();
+
+  if (d.status === 'ok') {
+    // Card-Info aktualisieren ohne Reload
+    if (_feCardEl) {
+      const subs = _feCardEl.querySelectorAll('.person-card-sub');
+      if (subs[0]) subs[0].textContent = d.frame_count + ' frames';
+      // onclick neu setzen
+      _feCardEl.setAttribute('onclick', `seekToClip(${d.frame_start}, ${d.frame_end})`);
+      _feCardEl.setAttribute('title', `Zu Clip springen (Frame ${d.frame_start}–${d.frame_end})`);
+    }
+    toast(`Frames gesetzt: ${d.frame_start}–${d.frame_end}`);
+    closeFrameEdit();
+  } else {
+    toast(d.error || 'Fehler beim Speichern', 'error');
+  }
+}
+
+// ── Neuen Track anlegen ────────────────────────────────────────────────────
+function openCreateTrack() {
+  const panel = document.getElementById('createTrackPanel');
+  const isOpen = panel.style.display !== 'none';
+  panel.style.display = isOpen ? 'none' : '';
+  if (!isOpen) {
+    const player = document.getElementById('videoPlayer');
+    if (player) {
+      const f = Math.round(player.currentTime * VIDEO_FPS);
+      document.getElementById('ctStart').value = f;
+      document.getElementById('ctEnd').value   = f + Math.round(VIDEO_FPS * 3);
+    }
+    _updateCtInfo();
+  }
+}
+
+function closeCreateTrack() {
+  document.getElementById('createTrackPanel').style.display = 'none';
+}
+
+function ctGrab(which) {
+  const player = document.getElementById('videoPlayer');
+  if (!player) return;
+  const frame = Math.round(player.currentTime * VIDEO_FPS);
+  document.getElementById(which === 'start' ? 'ctStart' : 'ctEnd').value = frame;
+  _updateCtInfo();
+}
+
+function _updateCtInfo() {
+  const s     = parseInt(document.getElementById('ctStart').value) || 0;
+  const e     = parseInt(document.getElementById('ctEnd').value)   || 0;
+  const count = Math.max(0, e - s + 1);
+  const secs  = (count / VIDEO_FPS).toFixed(1);
+  document.getElementById('ctInfo').textContent = count > 0 ? `${count} Frames · ${secs}s` : '';
+}
+document.getElementById('ctStart').addEventListener('input', _updateCtInfo);
+document.getElementById('ctEnd').addEventListener('input',   _updateCtInfo);
+
+function ctPreview() {
+  const s = parseInt(document.getElementById('ctStart').value);
+  const e = parseInt(document.getElementById('ctEnd').value);
+  if (!isNaN(s) && !isNaN(e)) seekToClip(s, e);
+}
+
+async function saveCreateTrack() {
+  const s = parseInt(document.getElementById('ctStart').value);
+  const e = parseInt(document.getElementById('ctEnd').value);
+  if (isNaN(s) || isNaN(e) || e < s) { toast('Ungültiger Frame-Bereich', 'error'); return; }
+
+  const fd = new FormData();
+  fd.append('csrfmiddlewaretoken', '{{ csrf_token }}');
+  fd.append('frame_start', s);
+  fd.append('frame_end',   e);
+  const r = await fetch('{% url "person_create" video.pk %}', { method: 'POST', body: fd });
+  const d = await r.json();
+
+  if (d.status === 'created') {
+    const grid = document.querySelector('.person-grid');
+    const card = document.createElement('div');
+    card.className = 'person-card';
+    card.id = 'person-card-' + d.person_id;
+    card.style.cursor = 'pointer';
+    card.setAttribute('onclick', `seekToClip(${d.frame_start}, ${d.frame_end})`);
+    card.setAttribute('title', `Zu Clip springen (Frame ${d.frame_start}–${d.frame_end})`);
+    card.innerHTML = `
+      ${d.thumbnail
+        ? `<img src="${d.thumbnail}" alt="">`
+        : `<div style="aspect-ratio:1;background:var(--border);display:flex;align-items:center;justify-content:center;font-size:2rem;color:var(--border2)">◉</div>`}
+      <div class="person-card-body">
+        <div class="person-card-name">Track ${d.track_id}</div>
+        <div class="person-card-sub">${d.frame_count} frames</div>
+        <div class="person-card-sub">Manuell</div>
+      </div>
+      <button class="person-card-delete" title="Track löschen"
+        onclick="deletePerson(event,'${d.person_id}','${d.delete_url}')">✕</button>
+      <button class="person-card-edit" title="Frames anpassen"
+        onclick="openFrameEdit(event,'${d.person_id}',${d.frame_start},${d.frame_end},'${d.set_frames_url}')">✎</button>
+    `;
+    if (grid) grid.prepend(card);
+    const countEl = document.getElementById('personCount');
+    if (countEl) countEl.textContent = parseInt(countEl.textContent) + 1;
+    toast(`Track ${d.track_id} angelegt`);
+    closeCreateTrack();
+  } else {
+    toast(d.error || 'Fehler beim Anlegen', 'error');
   }
 }
 </script>
