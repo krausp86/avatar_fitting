@@ -164,6 +164,14 @@ def video_delete(request, pk):
     return redirect('video_list')
 
 
+@require_POST
+def person_delete(request, pk):
+    person = get_object_or_404(DetectedPerson, pk=pk)
+    video_pk = person.video_id
+    person.delete()   # cascade removes group memberships automatically
+    return JsonResponse({'status': 'deleted', 'video_id': str(video_pk)})
+
+
 # ─── Person groups ────────────────────────────────────────────────────────────
 
 def person_list(request):
